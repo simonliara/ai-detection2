@@ -1,32 +1,42 @@
 #include "preprocess.h"
 #include <algorithm>
 #include <cmath>
+#include <cstdio>
+#include <iostream>
 
-static uint8_t* img_buffer_host = nullptr;
-static uint8_t* img_buffer_device = nullptr;
+static uint8_t* g_src_device = nullptr;   // packed BGR on device
+static int g_max_w = 0;
+static int g_max_h = 0;
 
-struct AffineMatrix {
-    float v[6];
-};
+struct AffineMatrix { float v[6]; };
+
+static inline void checkCuda(cudaError_t e, const char* what, const char* file, int line) {
+    if (e != cudaSuccess) {
+        std::cerr << "CUDA Error: " << cudaGetErrorString(e)
+                  << " at " << file << ":" << line
+                  << " (" << what << ")\n";
+        std::abort();
+    }
+}
+#define CHECK_CUDA(x) checkCuda((x), #x, __FILE__, __LINE__)
 
 __global__ void warp_affine_bilinear_kernel(
-    uint8_t* __restrict__ src, int src_stride, int src_w, int src_h,
+    const uint8_t* __restrict__ src, int src_stride, int src_w, int src_h,
     float* __restrict__ dst, int dst_w, int dst_h,
-    uint8_t const_val, AffineMatrix d2s) 
+    uint8_t const_val, AffineMatrix d2s)
 {
     int dx = blockIdx.x * blockDim.x + threadIdx.x;
     int dy = blockIdx.y * blockDim.y + threadIdx.y;
-
     if (dx >= dst_w || dy >= dst_h) return;
 
     float src_x = d2s.v[0] * dx + d2s.v[1] * dy + d2s.v[2] + 0.5f;
     float src_y = d2s.v[3] * dx + d2s.v[4] * dy + d2s.v[5] + 0.5f;
 
-    float c0 = const_val, c1 = const_val, c2 = const_val;
+    float b = const_val, g = const_val, r = const_val;
 
     if (src_x > -1 && src_x < src_w && src_y > -1 && src_y < src_h) {
-        int x_low = floorf(src_x);
-        int y_low = floorf(src_y);
+        int x_low  = floorf(src_x);
+        int y_low  = floorf(src_y);
         int x_high = x_low + 1;
         int y_high = y_low + 1;
 
@@ -37,71 +47,97 @@ __global__ void warp_affine_bilinear_kernel(
 
         float w1 = hy * hx, w2 = hy * lx, w3 = ly * hx, w4 = ly * lx;
 
-        uint8_t* p1 = (y_low >= 0 && x_low >= 0) ? src + y_low * src_stride + x_low * 3 : nullptr;
-        uint8_t* p2 = (y_low >= 0 && x_high < src_w) ? src + y_low * src_stride + x_high * 3 : nullptr;
-        uint8_t* p3 = (y_high < src_h && x_low >= 0) ? src + y_high * src_stride + x_low * 3 : nullptr;
-        uint8_t* p4 = (y_high < src_h && x_high < src_w) ? src + y_high * src_stride + x_high * 3 : nullptr;
+        auto ptr = [&](int x, int y) -> const uint8_t* {
+            if (x < 0 || x >= src_w || y < 0 || y >= src_h) return nullptr;
+            return src + y * src_stride + x * 3;
+        };
 
-        auto get_val = [&](uint8_t* p, int ch) -> uint8_t { return p ? p[ch] : const_val; };
+        const uint8_t* p1 = ptr(x_low,  y_low);
+        const uint8_t* p2 = ptr(x_high, y_low);
+        const uint8_t* p3 = ptr(x_low,  y_high);
+        const uint8_t* p4 = ptr(x_high, y_high);
 
-        c0 = w1 * get_val(p1, 0) + w2 * get_val(p2, 0) + w3 * get_val(p3, 0) + w4 * get_val(p4, 0);
-        c1 = w1 * get_val(p1, 1) + w2 * get_val(p2, 1) + w3 * get_val(p3, 1) + w4 * get_val(p4, 1);
-        c2 = w1 * get_val(p1, 2) + w2 * get_val(p2, 2) + w3 * get_val(p3, 2) + w4 * get_val(p4, 2);
+        auto getc = [&](const uint8_t* p, int c)->float { return p ? (float)p[c] : (float)const_val; };
+
+        b = w1 * getc(p1,0) + w2 * getc(p2,0) + w3 * getc(p3,0) + w4 * getc(p4,0);
+        g = w1 * getc(p1,1) + w2 * getc(p2,1) + w3 * getc(p3,1) + w4 * getc(p4,1);
+        r = w1 * getc(p1,2) + w2 * getc(p2,2) + w3 * getc(p3,2) + w4 * getc(p4,2);
     }
 
-    float t = c2; c2 = c0; c0 = t;
-
-    int area = dst_w * dst_h;
+    int area   = dst_w * dst_h;
     int offset = dy * dst_w + dx;
-    
-    dst[offset] = c0 / 255.0f;
-    dst[offset + area] = c1 / 255.0f;
-    dst[offset + area * 2] = c2 / 255.0f;
+
+    dst[offset + 0*area] = r / 255.0f;  // R
+    dst[offset + 1*area] = g / 255.0f;  // G
+    dst[offset + 2*area] = b / 255.0f;  // B
 }
 
-void cuda_preprocess_init(int max_image_size) {
-    if (!img_buffer_host) 
-        cudaMallocHost((void**)&img_buffer_host, max_image_size * 3);
-    if (!img_buffer_device) 
-        cudaMalloc((void**)&img_buffer_device, max_image_size * 3);
-}
-
-void cuda_preprocess_destroy() {
-    if (img_buffer_device) { cudaFree(img_buffer_device); img_buffer_device = nullptr; }
-    if (img_buffer_host) { cudaFreeHost(img_buffer_host); img_buffer_host = nullptr; }
-}
-
-void cuda_preprocess(uint8_t* src, int src_width, int src_height,
-                     float* dst, int dst_width, int dst_height,
-                     cudaStream_t stream) 
+void cuda_preprocess_init(int max_w, int max_h)
 {
-    int img_size = src_width * src_height * 3;
-    
-    memcpy(img_buffer_host, src, img_size);
-    cudaMemcpyAsync(img_buffer_device, img_buffer_host, img_size, cudaMemcpyHostToDevice, stream);
+    g_max_w = max_w;
+    g_max_h = max_h;
+    size_t bytes = (size_t)max_w * (size_t)max_h * 3;
+
+    if (!g_src_device) {
+        CHECK_CUDA(cudaMalloc(&g_src_device, bytes));
+    }
+}
+
+void cuda_preprocess_destroy()
+{
+    if (g_src_device) {
+        cudaFree(g_src_device);
+        g_src_device = nullptr;
+    }
+    g_max_w = g_max_h = 0;
+}
+
+void cuda_preprocess(const uint8_t* src, int src_w, int src_h, int src_stride,
+                     float* dst_chw, int dst_w, int dst_h,
+                     cudaStream_t stream)
+{
+    if (!src || !dst_chw) return;
+    if (!g_src_device) {
+        std::cerr << "[preprocess] init not called\n";
+        return;
+    }
+    if (src_w > g_max_w || src_h > g_max_h) {
+        std::cerr << "[preprocess] src exceeds max buffer: "
+                  << src_w << "x" << src_h << " > "
+                  << g_max_w << "x" << g_max_h << "\n";
+        return;
+    }
+
+    CHECK_CUDA(cudaMemcpy2DAsync(
+        g_src_device,              // dst
+        src_w * 3,                 // dst pitch (packed)
+        src,                       // src
+        src_stride,                // src pitch (cv::Mat.step)
+        src_w * 3,                 // row bytes
+        src_h,                     // rows
+        cudaMemcpyHostToDevice,
+        stream
+    ));
 
     AffineMatrix d2s;
-    float scale = std::min((float)dst_height / src_height, (float)dst_width / src_width);
-    
-    float tx = -scale * src_width * 0.5f + dst_width * 0.5f;
-    float ty = -scale * src_height * 0.5f + dst_height * 0.5f;
+    float scale = fminf((float)dst_h / src_h, (float)dst_w / src_w);
+    if (scale < 1e-6f) return;
 
-    double inv_scale = 1.0 / scale;
-    d2s.v[0] = inv_scale;
-    d2s.v[1] = 0;
-    d2s.v[2] = -tx * inv_scale;
-    d2s.v[3] = 0;
-    d2s.v[4] = inv_scale;
-    d2s.v[5] = -ty * inv_scale;
+    float tx = -scale * src_w * 0.5f + dst_w * 0.5f;
+    float ty = -scale * src_h * 0.5f + dst_h * 0.5f;
+
+    float inv_scale = 1.0f / scale;
+    d2s.v[0] = inv_scale; d2s.v[1] = 0.0f;     d2s.v[2] = -tx * inv_scale;
+    d2s.v[3] = 0.0f;     d2s.v[4] = inv_scale; d2s.v[5] = -ty * inv_scale;
 
     dim3 threads(32, 32);
-    dim3 blocks((dst_width + threads.x - 1) / threads.x, 
-                (dst_height + threads.y - 1) / threads.y);
+    dim3 blocks((dst_w + threads.x - 1) / threads.x,
+                (dst_h + threads.y - 1) / threads.y);
 
     warp_affine_bilinear_kernel<<<blocks, threads, 0, stream>>>(
-        img_buffer_device, src_width * 3, src_width, src_height,
-        dst, dst_width, dst_height,
-        114,
-        d2s
+        g_src_device, src_w * 3, src_w, src_h,
+        dst_chw, dst_w, dst_h,
+        114, d2s
     );
+    CHECK_CUDA(cudaPeekAtLastError());
 }

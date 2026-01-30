@@ -24,11 +24,11 @@ static const std::vector<std::string> CLASS_NAMES = {
     "hair drier", "toothbrush"
 };
 
-extern void cuda_preprocess(uint8_t* src, int src_width, int src_height, 
-                           float* dst, int dst_width, int dst_height, 
-                           cudaStream_t stream);
+extern void cuda_preprocess(const uint8_t* src, int src_w, int src_h, int src_stride,
+                     float* dst_chw, int dst_w, int dst_h,
+                     cudaStream_t stream);
 
-extern void cuda_preprocess_init(int max_image_size);
+extern void cuda_preprocess_init(int max_w, int max_h);
 extern void cuda_preprocess_destroy();
 
 extern void cuda_decode(float* predict, int num_bboxes, int num_classes, float conf_thresh, 
@@ -59,7 +59,7 @@ public:
     int last_img_w = 0;
     int last_img_h = 0;
 
-    const int MAX_IMAGE_SIZE = 4096 * 4096;
+    const int MAX_IMAGE_SIZE = 1920 * 1080;
     const int MAX_OUTPUT_BBOX_COUNT = 1000;
 
     nvinfer1::IRuntime* runtime = nullptr;
@@ -124,22 +124,37 @@ void YOLOv11::Impl::init(const std::string& engine_path, nvinfer1::ILogger& logg
     engine = runtime->deserializeCudaEngine(buffer.data(), size);
     context = engine->createExecutionContext();
 
+#if NV_TENSORRT_MAJOR < 10
     auto in_dims = engine->getBindingDimensions(0);
+    auto out_dims = engine->getBindingDimensions(1);
+#else
+    const char* in_name = engine->getIOTensorName(0);
+    const char* out_name = engine->getIOTensorName(1);
+    auto in_dims = engine->getTensorShape(in_name);
+    auto out_dims = engine->getTensorShape(out_name);
+#endif
+
+    std::cout << "Output Dims: " << out_dims.d[0] << "x" << out_dims.d[1] << "x" << out_dims.d[2] << std::endl;
     input_h = in_dims.d[2];
     input_w = in_dims.d[3];
+
+    for (int i = 0; i < engine->getNbIOTensors(); ++i) {
+        const char* name = engine->getIOTensorName(i);
+        nvinfer1::TensorIOMode mode = engine->getTensorIOMode(name);
+        std::cout << "Tensor " << i << ": " << name << " (" << (mode == nvinfer1::TensorIOMode::kINPUT ? "Input" : "Output") << ")" << std::endl;
+    }
     
-    auto out_dims = engine->getBindingDimensions(1);
     detection_attribute_size = out_dims.d[1];
     num_detections = out_dims.d[2];
     num_classes = detection_attribute_size - 4;
 
     CHECK_CUDA(cudaMalloc(&gpu_buffers[0], 3 * input_w * input_h * sizeof(float)));
     CHECK_CUDA(cudaMalloc(&gpu_buffers[1], detection_attribute_size * num_detections * sizeof(float)));
-    CHECK_CUDA(cudaMalloc(&gpu_output_buffer, MAX_OUTPUT_BBOX_COUNT * 6 * sizeof(float)));
+    CHECK_CUDA(cudaMalloc(&gpu_output_buffer, MAX_OUTPUT_BBOX_COUNT * 7 * sizeof(float)));
     CHECK_CUDA(cudaMalloc(&gpu_valid_count, sizeof(int)));
 
     CHECK_CUDA(cudaStreamCreate(&stream));
-    cuda_preprocess_init(MAX_IMAGE_SIZE);
+    cuda_preprocess_init(1920, 1080);
 }
 
 void YOLOv11::Impl::generateColors() {
@@ -152,7 +167,7 @@ void YOLOv11::Impl::generateColors() {
 YOLOv11::YOLOv11(std::string model_path, nvinfer1::ILogger& logger, float conf_thresh, float nms_thresh)
     : pImpl(std::make_unique<Impl>(model_path, logger, conf_thresh, nms_thresh)) 
 {
-    for(int i=0; i<5; ++i) this->infer();
+    // for(int i=0; i<5; ++i) this->infer();
 }
 
 YOLOv11::~YOLOv11() = default;
@@ -160,26 +175,51 @@ YOLOv11::~YOLOv11() = default;
 float YOLOv11::getConfThreshold() const { return pImpl->conf_threshold; }
 float YOLOv11::getNMSThreshold() const { return pImpl->nms_threshold; }
 
-void YOLOv11::preprocess(cv::Mat& image)
-{
+void YOLOv11::preprocess(cv::Mat& image) {
     if (image.empty()) return;
-    pImpl->last_img_w = image.cols;
-    pImpl->last_img_h = image.rows;
 
-    cv::Mat input_mat;
-    if (image.type() == CV_8UC3) input_mat = image;
-    else if (image.channels() == 1) cv::cvtColor(image, input_mat, cv::COLOR_GRAY2BGR);
-    else if (image.channels() == 4) cv::cvtColor(image, input_mat, cv::COLOR_BGRA2BGR);
-    else image.copyTo(input_mat); 
+    cv::Mat bgr;
+    if (image.channels() == 3 && image.type() == CV_8UC3) {
+        bgr = image;
+    } else if (image.channels() == 4) {
+        cv::cvtColor(image, bgr, cv::COLOR_BGRA2BGR);
+    } else if (image.channels() == 1) {
+        cv::cvtColor(image, bgr, cv::COLOR_GRAY2BGR);
+    } else {
+        std::cerr << "Unsupported input type\n";
+        return;
+    }
 
-    cuda_preprocess(input_mat.data, input_mat.cols, input_mat.rows, 
-                    pImpl->gpu_buffers[0], pImpl->input_w, pImpl->input_h, pImpl->stream);
+    // If step != cols*3, memcpy2DAsync handles it, so clone is optional now.
+    // But it doesn’t hurt to keep:
+    // if (!bgr.isContinuous()) bgr = bgr.clone();
+
+    pImpl->last_img_w = bgr.cols;
+    pImpl->last_img_h = bgr.rows;
+
+    cuda_preprocess(bgr.data, bgr.cols, bgr.rows, (int)bgr.step,
+                    pImpl->gpu_buffers[0], pImpl->input_w, pImpl->input_h,
+                    pImpl->stream);
+
+    std::vector<float> cpu_check(pImpl->input_w * pImpl->input_h * 3);
+    cudaMemcpyAsync(cpu_check.data(), pImpl->gpu_buffers[0], cpu_check.size() * sizeof(float), cudaMemcpyDeviceToHost, pImpl->stream);
+    cudaStreamSynchronize(pImpl->stream); 
+    cv::Mat debug_img(pImpl->input_h, pImpl->input_w, CV_32FC1, cpu_check.data());
+    cv::normalize(debug_img, debug_img, 0, 255, cv::NORM_MINMAX);
+    debug_img.convertTo(debug_img, CV_8UC1);
+    cv::imwrite("jetson_input_check.png", debug_img); 
+
     CHECK_CUDA(cudaStreamSynchronize(pImpl->stream));
 }
 
 void YOLOv11::infer()
 {
-    pImpl->context->enqueueV2((void**)pImpl->gpu_buffers, pImpl->stream, nullptr);
+    const char* input_name = pImpl->engine->getIOTensorName(0);
+    const char* output_name = pImpl->engine->getIOTensorName(1);
+
+    pImpl->context->setTensorAddress(input_name, pImpl->gpu_buffers[0]);
+    pImpl->context->setTensorAddress(output_name, pImpl->gpu_buffers[1]);
+    pImpl->context->enqueueV3(pImpl->stream);
 }
 
 void YOLOv11::postprocess(std::vector<YoloDetection>& output)
@@ -195,6 +235,10 @@ void YOLOv11::postprocess(std::vector<YoloDetection>& output)
     CHECK_CUDA(cudaMemcpyAsync(pImpl->cpu_valid_count, pImpl->gpu_valid_count, sizeof(int), 
                                cudaMemcpyDeviceToHost, pImpl->stream));
     CHECK_CUDA(cudaStreamSynchronize(pImpl->stream));
+
+    // std::vector<float> debug_out(10);
+    // cudaMemcpy(debug_out.data(), pImpl->gpu_buffers[1], 10 * sizeof(float), cudaMemcpyDeviceToHost);
+    // for(float f : debug_out) std::cout << f << " ";
 
     int num_candidates = std::min(pImpl->cpu_valid_count[0], pImpl->MAX_OUTPUT_BBOX_COUNT);
     if (num_candidates <= 0) return;
@@ -215,7 +259,7 @@ void YOLOv11::postprocess(std::vector<YoloDetection>& output)
     for (int i = 0; i < num_candidates; ++i) {
         float* item = &cpu_buffer[i * 7];
         
-        if (item[6] != 1.0f) continue; 
+        if (item[6] < 0.5f) continue;
 
         float left   = item[0]; 
         float top    = item[1]; 
@@ -228,11 +272,22 @@ void YOLOv11::postprocess(std::vector<YoloDetection>& output)
         float y1 = (top - offset_y) / scale;
         float x2 = (right - offset_x) / scale;
         float y2 = (bottom - offset_y) / scale;
+        if (x2 <= 0 || y2 <= 0 || x1 >= pImpl->last_img_w || y1 >= pImpl->last_img_h)
+            continue;
 
-        int x = std::max(0, std::min((int)x1, pImpl->last_img_w - 1));
-        int y = std::max(0, std::min((int)y1, pImpl->last_img_h - 1));
-        int w = std::min((int)(x2 - x1), pImpl->last_img_w - x);
-        int h = std::min((int)(y2 - y1), pImpl->last_img_h - y);
+        int x = (int)std::floor(x1);
+        int y = (int)std::floor(y1);
+        int x2i = (int)std::ceil(x2);
+        int y2i = (int)std::ceil(y2);
+
+        x = std::max(0, std::min(x, pImpl->last_img_w - 1));
+        y = std::max(0, std::min(y, pImpl->last_img_h - 1));
+        x2i = std::max(0, std::min(x2i, pImpl->last_img_w));
+        y2i = std::max(0, std::min(y2i, pImpl->last_img_h));
+
+        int w = x2i - x;
+        int h = y2i - y;
+        if (w <= 1 || h <= 1) continue;
 
         if (w > 0 && h > 0) {
             YoloDetection res;

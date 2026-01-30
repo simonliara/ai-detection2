@@ -18,45 +18,48 @@ __device__ float box_iou(float aleft, float atop, float aright, float abottom,
     return c_area / (a_area + b_area - c_area);
 }
 
-__global__ void decode_kernel(float* predict, int num_bboxes, int num_classes, float conf_thresh, 
-                              float* output, int max_objects, int* num_valid_objects) 
+__device__ __forceinline__ float sigmoidf_fast(float x) {
+    return 1.0f / (1.0f + expf(-x));
+}
+
+__global__ void decode_kernel(const float* predict, int num_bboxes, int num_classes, float conf_thresh,
+                              float* output, int max_objects, int* num_valid_objects)
 {
     int i = blockIdx.x * blockDim.x + threadIdx.x;
     if (i >= num_bboxes) return;
 
-    float max_conf = -1.0f;
-    int max_id = -1;
+    float best = -1.0f;
+    int best_id = -1;
+
+    #pragma unroll
     for (int c = 0; c < num_classes; c++) {
-        float score = predict[(4 + c) * num_bboxes + i];
-        if (score > max_conf) {
-            max_conf = score;
-            max_id = c;
-        }
+        float s = predict[(4 + c) * num_bboxes + i];
+        if (s > best) { best = s; best_id = c; }
     }
 
-    if (max_conf > conf_thresh) {
-        int idx = atomicAdd(num_valid_objects, 1);
-        if (idx >= max_objects) return;
+    if (best < conf_thresh) return;
 
-        float cx = predict[0 * num_bboxes + i];
-        float cy = predict[1 * num_bboxes + i];
-        float w  = predict[2 * num_bboxes + i];
-        float h  = predict[3 * num_bboxes + i];
+    float cx = predict[0 * num_bboxes + i];
+    float cy = predict[1 * num_bboxes + i];
+    float w  = predict[2 * num_bboxes + i];
+    float h  = predict[3 * num_bboxes + i];
 
-        float left   = cx - w * 0.5f;
-        float top    = cy - h * 0.5f;
-        float right  = cx + w * 0.5f;
-        float bottom = cy + h * 0.5f;
+    float left   = cx - 0.5f * w;
+    float top    = cy - 0.5f * h;
+    float right  = cx + 0.5f * w;
+    float bottom = cy + 0.5f * h;
 
-        int offset = idx * DATA_LENGTH; 
-        output[offset + 0] = left;
-        output[offset + 1] = top;
-        output[offset + 2] = right;
-        output[offset + 3] = bottom;
-        output[offset + 4] = max_conf;
-        output[offset + 5] = (float)max_id;
-        output[offset + 6] = 1.0f; // 1.0 = Keep, 0.0 = Suppress
-    }
+    int idx = atomicAdd(num_valid_objects, 1);
+    if (idx >= max_objects) return;
+
+    int off = idx * DATA_LENGTH;
+    output[off + 0] = left;
+    output[off + 1] = top;
+    output[off + 2] = right;
+    output[off + 3] = bottom;
+    output[off + 4] = best;
+    output[off + 5] = (float)best_id;
+    output[off + 6] = 1.0f;
 }
 
 __global__ void nms_kernel(float* bboxes, int* num_valid_objects, float nms_thresh, int max_objects) 
