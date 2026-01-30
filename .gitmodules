@@ -1,0 +1,6 @@
+[submodule "external/data-bus"]
+	path = external/data-bus
+	url = git@github.com:ararobotique/data-bus.git
+[submodule "external/spdlog"]
+	path = external/spdlog
+	url = https://github.com/gabime/spdlog.git

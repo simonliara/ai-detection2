@@ -1,0 +1,79 @@
+
+[build-system]
+requires = ["setuptools", "build>=1.2"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "ara.ai_detection"
+dynamic = ["version"]
+requires-python = ">= 3.7"
+description = "Detect person and car from image"
+readme = "README.md"
+
+# install dependencies of package
+dependencies = [
+    "ara.data-bus",
+    "opencv-python",
+    "ultralytics",
+    "lapx",
+    "numpy~=1.26.4",
+    "importlib-metadata"
+]
+
+[tool.setuptools]
+include-package-data = true
+
+[tool.setuptools.packages.find]
+namespaces = false
+
+[tool.setuptools.package-data]
+ai_detection = ["yolo11m.pt"]
+
+[tool.setuptools.dynamic]
+version = { file = "version.txt" }
+
+[project.scripts]
+ai_detection = "ai_detection.__main__:main"
+
+# Other developement dependencies
+[project.optional-dependencies]
+tests = ["pytest", "pytest-cov", "pytest-mock"]
+dev = ["ruff"]
+package = ["pyinstaller"]
+all = ["ai_detection[tests,dev,package]"]
+
+[tool.mypy]
+warn_return_any = true
+warn_unused_configs = true
+ignore_missing_imports = true
+disable_error_code = ["import-untyped"]
+exclude = [
+    'build/',
+    'external/',
+    'dist/'
+]
+
+[tool.ruff]
+line-length = 160
+target-version = "py37"
+exclude = [
+    "external", ]
+
+[tool.ruff.lint]
+select = [
+    "E", # pycodestyle (error)
+    "F", # pyflakes
+    "W", # pycodestyle (warning)
+    "B", # flake8-bugbear
+    "I", # isort
+    "N", # pep8-naming
+    "PIE", # flake8-pie
+    "PLE", # pylint error
+    "RUF100", # Unused noqa comments
+    "PGH004", # blanket noqa comments
+    "UP", # pyupgrade
+    "C4", # flake8-comprehensions
+    "SIM201", "SIM202", "SIM222", "SIM223", # flake8-simplify
+    "ISC001", # implicitly concatenated string
+    "RET501", "RET502", # better return None handling
+]
