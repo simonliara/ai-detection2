@@ -8,6 +8,12 @@
 namespace nvinfer1 { class ILogger; }
 class Track;
 
+struct YoloStats {
+    float pre;
+    float infer;
+    float post;
+};
+
 struct YoloDetection
 {
     float conf;
@@ -24,6 +30,7 @@ public:
     void preprocess(cv::Mat& image);
     void infer();
     void postprocess(std::vector<YoloDetection>& output);
+    YoloStats getStats() const;
     
     void draw(cv::Mat& image, const std::vector<YoloDetection>& output);
     void draw(cv::Mat& image, const std::vector<std::shared_ptr<Track>>& tracks);

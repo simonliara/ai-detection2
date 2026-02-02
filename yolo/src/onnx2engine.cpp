@@ -26,7 +26,17 @@ private:
 };
 
 template <typename T>
-struct TrtDestroy { void operator()(T* p) const noexcept { if (p) p->destroy(); } };
+struct TrtDestroy {
+    void operator()(T* p) const noexcept {
+        if (p) {
+#if NV_TENSORRT_MAJOR < 10
+            p->destroy();
+#else
+            delete p;
+#endif
+        }
+    }
+};
 
 template <typename T>
 using TrtUnique = std::unique_ptr<T, TrtDestroy<T>>;
@@ -142,11 +152,12 @@ int main(int argc, char** argv) {
         TrtUnique<nvinfer1::IBuilder> builder(nvinfer1::createInferBuilder(logger));
         if (!builder) throw std::runtime_error("createInferBuilder failed");
 
-        const uint32_t explicitBatch =
-            1U << static_cast<uint32_t>(nvinfer1::NetworkDefinitionCreationFlag::kEXPLICIT_BATCH);
-
+#if NV_TENSORRT_MAJOR < 10
+        const uint32_t explicitBatch = 1U << static_cast<uint32_t>(nvinfer1::NetworkDefinitionCreationFlag::kEXPLICIT_BATCH);
         TrtUnique<nvinfer1::INetworkDefinition> network(builder->createNetworkV2(explicitBatch));
-        if (!network) throw std::runtime_error("createNetworkV2 failed");
+#else
+        TrtUnique<nvinfer1::INetworkDefinition> network(builder->createNetworkV2(0));
+#endif
 
         TrtUnique<nvinfer1::IBuilderConfig> config(builder->createBuilderConfig());
         if (!config) throw std::runtime_error("createBuilderConfig failed");
@@ -160,6 +171,12 @@ int main(int argc, char** argv) {
             std::cerr << "[WARN] INT8 selected. You need Q/DQ ONNX or an INT8 calibrator.\n";
         }
 
+        // uint32_t tactics = config->getTacticSources();
+        // tactics &= ~(1U << static_cast<uint32_t>(nvinfer1::TacticSource::kCUDNN));
+        // tactics &= ~(1U << static_cast<uint32_t>(nvinfer1::TacticSource::kCUBLAS));
+        // config->setTacticSources(tactics);
+        // std::cout << "[INFO] Restricted tactic sources to avoid cuTensor errors on Jetson." << std::endl;
+        
         TrtUnique<nvonnxparser::IParser> parser(nvonnxparser::createParser(*network, logger));
         if (!parser) throw std::runtime_error("createParser failed");
 

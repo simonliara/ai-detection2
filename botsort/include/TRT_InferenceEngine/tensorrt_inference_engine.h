@@ -144,5 +144,6 @@ private:
     bool _deserialize_engine(const std::string &engine_path);
 
     void _allocate_buffers();
+    std::vector<std::vector<float>> _host_outputs;
 };
 }// namespace inference_backend

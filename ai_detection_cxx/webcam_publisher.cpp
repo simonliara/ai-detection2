@@ -163,10 +163,11 @@ int main(int argc, char** argv) {
         msg.image(std::move(img));
 
         writer.write(msg);
+        printf("Published frame: %ux%u\n", img.width(), img.height());
 
         // 3. UI and Timing
-        cv::imshow("Publisher Preview", frame);
-        if (cv::waitKey(1) == 27) break;
+        // cv::imshow("Publisher Preview", frame);
+        // if (cv::waitKey(1) == 27) break;
 
         const auto elapsed = steady_clock::now() - loopStart;
         if (elapsed < framePeriod) {

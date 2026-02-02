@@ -12,18 +12,6 @@
 
 #include "track.h" 
 
-static const std::vector<std::string> CLASS_NAMES = {
-    "person", "bicycle", "car", "motorcycle", "airplane", "bus", "train", "truck", "boat", "traffic light",
-    "fire hydrant", "stop sign", "parking meter", "bench", "bird", "cat", "dog", "horse", "sheep", "cow",
-    "elephant", "bear", "zebra", "giraffe", "backpack", "umbrella", "handbag", "tie", "suitcase", "frisbee",
-    "skis", "snowboard", "sports ball", "kite", "baseball bat", "baseball glove", "skateboard", "surfboard",
-    "tennis racket", "bottle", "wine glass", "cup", "fork", "knife", "spoon", "bowl", "banana", "apple",
-    "sandwich", "orange", "broccoli", "carrot", "hot dog", "pizza", "donut", "cake", "chair", "couch",
-    "potted plant", "bed", "dining table", "toilet", "tv", "laptop", "mouse", "remote", "keyboard", "cell phone",
-    "microwave", "oven", "toaster", "sink", "refrigerator", "book", "clock", "vase", "scissors", "teddy bear",
-    "hair drier", "toothbrush"
-};
-
 extern void cuda_preprocess(const uint8_t* src, int src_w, int src_h, int src_stride,
                      float* dst_chw, int dst_w, int dst_h,
                      cudaStream_t stream);
@@ -35,6 +23,13 @@ extern void cuda_decode(float* predict, int num_bboxes, int num_classes, float c
                         float* output, int max_objects, int* num_valid_objects, cudaStream_t stream);
 
 extern void cuda_nms(float* output, int* num_valid_objects, float nms_thresh, int max_objects, cudaStream_t stream);
+
+extern void cuda_decode(const float* predict, int num_bboxes, int num_classes, 
+                           float conf_thresh, float* output, int max_objects, 
+                           int* num_valid_objects, float scale, float ox, float oy,
+                           cudaStream_t stream);
+extern void cuda_nms(float* bboxes, int* num_valid_objects, float nms_thresh, 
+                        int max_objects, cudaStream_t stream);
 
 inline void checkCuda(cudaError_t result, const char* func, const char* file, int line) {
     if (result != cudaSuccess) {
@@ -48,7 +43,11 @@ class YOLOv11::Impl {
 public:
     Impl(std::string model_path, nvinfer1::ILogger& logger, float conf_thresh, float nms_thresh);
     ~Impl();
+    
+    std::vector<std::string> class_names;
+    void loadClasses(const std::string& engine_path);
 
+    cudaEvent_t start_event, pre_event, infer_event, post_event;
     float conf_threshold;
     float nms_threshold;
     int input_w = 0;
@@ -71,6 +70,7 @@ public:
     float* gpu_output_buffer = nullptr;
     int* gpu_valid_count = nullptr;
     int* cpu_valid_count = nullptr;
+    std::vector<float> cpu_buffer;
     
     std::vector<cv::Scalar> class_colors;
 
@@ -107,21 +107,38 @@ YOLOv11::Impl::~Impl()
     if (context) delete context;
     if (engine) delete engine;
     if (runtime) delete runtime;
+
+    cudaEventDestroy(start_event);
+    cudaEventDestroy(pre_event);
+    cudaEventDestroy(infer_event);
+    cudaEventDestroy(post_event);
 }
 
 void YOLOv11::Impl::init(const std::string& engine_path, nvinfer1::ILogger& logger)
 {
+    loadClasses(engine_path);
+
     std::ifstream file(engine_path, std::ios::binary | std::ios::ate);
-    std::streamsize size = file.tellg();
+    if (!file.good()) {
+        std::cerr << "[Error] Could not read engine file: " << engine_path << std::endl;
+        abort();
+    }
+
+    std::streamsize size = file.tellg(); 
     file.seekg(0, std::ios::beg);
+
     std::vector<char> buffer(size);
     if (!file.read(buffer.data(), size)) {
-        std::cerr << "[Error] Could not read engine file." << std::endl;
+        std::cerr << "[Error] Failed to read engine file content." << std::endl;
         abort();
     }
 
     runtime = nvinfer1::createInferRuntime(logger);
     engine = runtime->deserializeCudaEngine(buffer.data(), size);
+    if (!engine) {
+        std::cerr << "[Error] Failed to deserialize CUDA engine." << std::endl;
+        abort();
+    }
     context = engine->createExecutionContext();
 
 #if NV_TENSORRT_MAJOR < 10
@@ -147,6 +164,7 @@ void YOLOv11::Impl::init(const std::string& engine_path, nvinfer1::ILogger& logg
     detection_attribute_size = out_dims.d[1];
     num_detections = out_dims.d[2];
     num_classes = detection_attribute_size - 4;
+    cpu_buffer.resize(MAX_OUTPUT_BBOX_COUNT * 7);
 
     CHECK_CUDA(cudaMalloc(&gpu_buffers[0], 3 * input_w * input_h * sizeof(float)));
     CHECK_CUDA(cudaMalloc(&gpu_buffers[1], detection_attribute_size * num_detections * sizeof(float)));
@@ -155,6 +173,45 @@ void YOLOv11::Impl::init(const std::string& engine_path, nvinfer1::ILogger& logg
 
     CHECK_CUDA(cudaStreamCreate(&stream));
     cuda_preprocess_init(1920, 1080);
+
+    CHECK_CUDA(cudaEventCreate(&start_event));
+    CHECK_CUDA(cudaEventCreate(&pre_event));
+    CHECK_CUDA(cudaEventCreate(&infer_event));
+    CHECK_CUDA(cudaEventCreate(&post_event));
+}
+
+void YOLOv11::Impl::loadClasses(const std::string& engine_path) {
+    std::string txt_path = engine_path;
+    size_t last_dot = txt_path.find_last_of(".");
+    if (last_dot != std::string::npos) {
+        txt_path = txt_path.substr(0, last_dot) + ".txt";
+    }
+    std::ifstream file(txt_path);
+    if (!file.is_open() && last_dot != std::string::npos) {
+        std::string fallback_path = txt_path;
+        size_t prev_dot = fallback_path.find_last_of(".", last_dot - 1);
+        if (prev_dot != std::string::npos) {
+            fallback_path = fallback_path.substr(0, prev_dot) + ".txt";
+            file.open(fallback_path); 
+            if (file.is_open()) {
+                txt_path = fallback_path;
+            }
+        }
+    }
+
+    if (!file.is_open()) {
+        std::cerr << "[WARN] Class file not found (tried: " << txt_path << ")!\n";
+        exit(1);
+    }
+
+    std::cout << "[INFO] Loading classes from: " << txt_path << std::endl;
+    std::string line;
+    class_names.clear();
+    while (std::getline(file, line)) {
+        if (!line.empty() && line.back() == '\r') line.pop_back();
+        class_names.push_back(line);
+    }
+    std::cout << "[INFO] Loaded " << class_names.size() << " classes.\n";
 }
 
 void YOLOv11::Impl::generateColors() {
@@ -176,6 +233,7 @@ float YOLOv11::getConfThreshold() const { return pImpl->conf_threshold; }
 float YOLOv11::getNMSThreshold() const { return pImpl->nms_threshold; }
 
 void YOLOv11::preprocess(cv::Mat& image) {
+    cudaEventRecord(pImpl->start_event, pImpl->stream);
     if (image.empty()) return;
 
     cv::Mat bgr;
@@ -201,15 +259,8 @@ void YOLOv11::preprocess(cv::Mat& image) {
                     pImpl->gpu_buffers[0], pImpl->input_w, pImpl->input_h,
                     pImpl->stream);
 
-    std::vector<float> cpu_check(pImpl->input_w * pImpl->input_h * 3);
-    cudaMemcpyAsync(cpu_check.data(), pImpl->gpu_buffers[0], cpu_check.size() * sizeof(float), cudaMemcpyDeviceToHost, pImpl->stream);
-    cudaStreamSynchronize(pImpl->stream); 
-    cv::Mat debug_img(pImpl->input_h, pImpl->input_w, CV_32FC1, cpu_check.data());
-    cv::normalize(debug_img, debug_img, 0, 255, cv::NORM_MINMAX);
-    debug_img.convertTo(debug_img, CV_8UC1);
-    cv::imwrite("jetson_input_check.png", debug_img); 
-
-    CHECK_CUDA(cudaStreamSynchronize(pImpl->stream));
+    // CHECK_CUDA(cudaStreamSynchronize(pImpl->stream));
+    cudaEventRecord(pImpl->pre_event, pImpl->stream);
 }
 
 void YOLOv11::infer()
@@ -220,83 +271,69 @@ void YOLOv11::infer()
     pImpl->context->setTensorAddress(input_name, pImpl->gpu_buffers[0]);
     pImpl->context->setTensorAddress(output_name, pImpl->gpu_buffers[1]);
     pImpl->context->enqueueV3(pImpl->stream);
+    cudaEventRecord(pImpl->infer_event, pImpl->stream);
 }
 
 void YOLOv11::postprocess(std::vector<YoloDetection>& output)
 {
-    CHECK_CUDA(cudaMemsetAsync(pImpl->gpu_valid_count, 0, sizeof(int), pImpl->stream));
-    cuda_decode(pImpl->gpu_buffers[1], pImpl->num_detections, pImpl->num_classes, pImpl->conf_threshold,
-                pImpl->gpu_output_buffer, pImpl->MAX_OUTPUT_BBOX_COUNT, pImpl->gpu_valid_count,
-                pImpl->stream);
-
-    cuda_nms(pImpl->gpu_output_buffer, pImpl->gpu_valid_count, pImpl->nms_threshold, 
-             pImpl->MAX_OUTPUT_BBOX_COUNT, pImpl->stream);
-
-    CHECK_CUDA(cudaMemcpyAsync(pImpl->cpu_valid_count, pImpl->gpu_valid_count, sizeof(int), 
-                               cudaMemcpyDeviceToHost, pImpl->stream));
-    CHECK_CUDA(cudaStreamSynchronize(pImpl->stream));
-
-    // std::vector<float> debug_out(10);
-    // cudaMemcpy(debug_out.data(), pImpl->gpu_buffers[1], 10 * sizeof(float), cudaMemcpyDeviceToHost);
-    // for(float f : debug_out) std::cout << f << " ";
-
-    int num_candidates = std::min(pImpl->cpu_valid_count[0], pImpl->MAX_OUTPUT_BBOX_COUNT);
-    if (num_candidates <= 0) return;
-
-    std::vector<float> cpu_buffer(num_candidates * 7);
-    CHECK_CUDA(cudaMemcpyAsync(cpu_buffer.data(), pImpl->gpu_output_buffer, 
-                               num_candidates * 7 * sizeof(float), cudaMemcpyDeviceToHost, pImpl->stream));
-    CHECK_CUDA(cudaStreamSynchronize(pImpl->stream));
-
     output.clear();
     
     float r_w = pImpl->input_w / (float)pImpl->last_img_w;
     float r_h = pImpl->input_h / (float)pImpl->last_img_h;
-    float scale = (r_w < r_h) ? r_w : r_h; // Min scale
+    float scale = (r_w < r_h) ? r_w : r_h;
     float offset_x = (pImpl->input_w - pImpl->last_img_w * scale) / 2.0f;
     float offset_y = (pImpl->input_h - pImpl->last_img_h * scale) / 2.0f;
 
+    CHECK_CUDA(cudaMemsetAsync(pImpl->gpu_valid_count, 0, sizeof(int), pImpl->stream));
+    cuda_decode(
+        pImpl->gpu_buffers[1], pImpl->num_detections, pImpl->num_classes, pImpl->conf_threshold,
+        pImpl->gpu_output_buffer, pImpl->MAX_OUTPUT_BBOX_COUNT, pImpl->gpu_valid_count,
+        scale, offset_x, offset_y, pImpl->stream);
+    cuda_nms(
+        pImpl->gpu_output_buffer, pImpl->gpu_valid_count, pImpl->nms_threshold, 
+        pImpl->MAX_OUTPUT_BBOX_COUNT, pImpl->stream);
+    CHECK_CUDA(cudaMemcpyAsync(pImpl->cpu_valid_count, pImpl->gpu_valid_count, sizeof(int), 
+                               cudaMemcpyDeviceToHost, pImpl->stream));
+    
+    CHECK_CUDA(cudaMemcpyAsync(pImpl->cpu_buffer.data(), pImpl->gpu_output_buffer, 
+                                pImpl->MAX_OUTPUT_BBOX_COUNT * 7 * sizeof(float), 
+                                cudaMemcpyDeviceToHost, pImpl->stream));
+    cudaEventRecord(pImpl->post_event, pImpl->stream);
+    CHECK_CUDA(cudaStreamSynchronize(pImpl->stream));
+
+    int num_candidates = std::min(pImpl->cpu_valid_count[0], pImpl->MAX_OUTPUT_BBOX_COUNT);
+
     for (int i = 0; i < num_candidates; ++i) {
-        float* item = &cpu_buffer[i * 7];
+        float* item = &pImpl->cpu_buffer[i * 7];
+        if (item[6] < 0.5f) continue; 
+
+        YoloDetection res;
+        res.class_id = (int)item[5];
+        res.conf = item[4];
         
-        if (item[6] < 0.5f) continue;
-
-        float left   = item[0]; 
-        float top    = item[1]; 
-        float right  = item[2]; 
-        float bottom = item[3];
-        float conf   = item[4]; 
-        int class_id = (int)item[5];
-
-        float x1 = (left - offset_x) / scale;
-        float y1 = (top - offset_y) / scale;
-        float x2 = (right - offset_x) / scale;
-        float y2 = (bottom - offset_y) / scale;
-        if (x2 <= 0 || y2 <= 0 || x1 >= pImpl->last_img_w || y1 >= pImpl->last_img_h)
-            continue;
-
-        int x = (int)std::floor(x1);
-        int y = (int)std::floor(y1);
-        int x2i = (int)std::ceil(x2);
-        int y2i = (int)std::ceil(y2);
+        int x = (int)item[0];
+        int y = (int)item[1];
+        int w = (int)item[2] - x;
+        int h = (int)item[3] - y;
 
         x = std::max(0, std::min(x, pImpl->last_img_w - 1));
         y = std::max(0, std::min(y, pImpl->last_img_h - 1));
-        x2i = std::max(0, std::min(x2i, pImpl->last_img_w));
-        y2i = std::max(0, std::min(y2i, pImpl->last_img_h));
-
-        int w = x2i - x;
-        int h = y2i - y;
-        if (w <= 1 || h <= 1) continue;
+        w = std::max(0, std::min(w, pImpl->last_img_w - x));
+        h = std::max(0, std::min(h, pImpl->last_img_h - y));
 
         if (w > 0 && h > 0) {
-            YoloDetection res;
-            res.class_id = class_id;
-            res.conf = conf;
             res.bbox = cv::Rect(x, y, w, h);
             output.push_back(res);
         }
     }
+}
+
+YoloStats YOLOv11::getStats() const {
+    YoloStats stats;
+    cudaEventElapsedTime(&stats.pre,   pImpl->start_event, pImpl->pre_event);
+    cudaEventElapsedTime(&stats.infer, pImpl->pre_event,   pImpl->infer_event);
+    cudaEventElapsedTime(&stats.post,  pImpl->infer_event, pImpl->post_event);
+    return stats;
 }
 
 void YOLOv11::draw(cv::Mat& image, const std::vector<YoloDetection>& output)
@@ -305,8 +342,8 @@ void YOLOv11::draw(cv::Mat& image, const std::vector<YoloDetection>& output)
         cv::Scalar color = pImpl->class_colors[det.class_id % pImpl->class_colors.size()];
         cv::rectangle(image, det.bbox, color, 2);
 
-        std::string name = (det.class_id >= 0 && det.class_id < CLASS_NAMES.size()) 
-                           ? CLASS_NAMES[det.class_id] 
+        std::string name = (det.class_id >= 0 && det.class_id < pImpl->class_names.size()) 
+                           ? pImpl->class_names[det.class_id] 
                            : std::to_string(det.class_id);
                            
         std::string label = name + " " + cv::format("%.2f", det.conf);

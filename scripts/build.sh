@@ -7,6 +7,7 @@ DEFAULT_TARGETS="
     ai-detection
     ai-detection.deb
     webcam
+    onnx2engine
         "
 
 TARGET=""

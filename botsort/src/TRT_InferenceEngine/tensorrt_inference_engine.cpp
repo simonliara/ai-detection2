@@ -2,6 +2,14 @@
 
 #include <NvOnnxParser.h>
 
+inline void checkCuda(cudaError_t result, const char* func, const char* file, int line) {
+    if (result != cudaSuccess) {
+        std::cerr << "CUDA Error: " << cudaGetErrorString(result) << " at " 
+                  << file << ":" << line << " (" << func << ")" << std::endl;
+    }
+}
+#define CHECK_CUDA(val) checkCuda((val), #val, __FILE__, __LINE__)
+
 namespace
 {
 std::string get_devicename_from_deviceid(int device_id)
@@ -10,14 +18,13 @@ std::string get_devicename_from_deviceid(int device_id)
     cudaGetDeviceProperties(&prop, device_id);
     auto device_name = std::string(prop.name);
 
-    // Remove spaces from device name
     device_name.erase(
             std::remove_if(device_name.begin(), device_name.end(), ::isspace),
             device_name.end());
 
     return device_name;
 }
-}// namespace
+}
 
 inference_backend::TensorRTInferenceEngine::TensorRTInferenceEngine(
         TRTOptimizerParams &optimization_params, u_int8_t logging_level)
@@ -25,7 +32,6 @@ inference_backend::TensorRTInferenceEngine::TensorRTInferenceEngine(
     _set_optimization_params(optimization_params);
     _init_TRT_logger(logging_level);
 
-    // Create CUDA stream used by this engine
     cudaError_t err = cudaStreamCreate(&_cuda_stream);
     if (err != cudaSuccess) {
         throw std::runtime_error(std::string("cudaStreamCreate failed: ") +
@@ -36,7 +42,6 @@ inference_backend::TensorRTInferenceEngine::TensorRTInferenceEngine(
 
 inference_backend::TensorRTInferenceEngine::~TensorRTInferenceEngine()
 {
-    // Make sure all queued GPU work is finished before freeing resources
     if (_cuda_stream) {
         cudaStreamSynchronize(_cuda_stream);
     }
@@ -77,7 +82,6 @@ bool inference_backend::TensorRTInferenceEngine::load_model(
                          .append(onnx_model_path)
                          .c_str());
 
-    // Check if ONNX model exists
     if (!file_exists(onnx_model_path))
     {
         _logger->log(nvinfer1::ILogger::Severity::kERROR,
@@ -87,7 +91,6 @@ bool inference_backend::TensorRTInferenceEngine::load_model(
         return false;
     }
 
-    // Ensure gpu_id is valid
     int numGPUs{0};
     cudaGetDeviceCount(&numGPUs);
     if (_optimization_params.gpu_id >= numGPUs)
@@ -102,7 +105,6 @@ bool inference_backend::TensorRTInferenceEngine::load_model(
                              .c_str());
     }
 
-    // Check if engine exists, if not build it
     std::string engine_path = get_engine_path(onnx_model_path);
     if (!file_exists(engine_path))
     {
@@ -113,7 +115,6 @@ bool inference_backend::TensorRTInferenceEngine::load_model(
         _build_engine(onnx_model_path);
     }
 
-    // Set device index
     if (auto ret = cudaSetDevice(_optimization_params.gpu_id); ret != 0)
     {
         _logger->log(nvinfer1::ILogger::Severity::kERROR,
@@ -123,7 +124,6 @@ bool inference_backend::TensorRTInferenceEngine::load_model(
         return false;
     }
 
-    // Deserialize engine
     _logger->log(nvinfer1::ILogger::Severity::kINFO,
                  std::string("Deserializing engine from path: ")
                          .append(engine_path)
@@ -149,44 +149,40 @@ bool inference_backend::TensorRTInferenceEngine::load_model(
 std::string inference_backend::TensorRTInferenceEngine::get_engine_path(
         const std::string &onnx_model_path) const
 {
-    // Parent director + model name
-    std::string engine_path =
-            boost::filesystem::path(onnx_model_path).parent_path().string() +
-            "/" + boost::filesystem::path(onnx_model_path).stem().string();
+    namespace fs = boost::filesystem;
+    fs::path p(onnx_model_path);
+    std::string parent_dir = p.parent_path().string();
+    std::string stem = p.stem().string();
 
-    // Hostname
+    std::string precision_str = _optimization_params.fp16 ? ".fp16" : ".fp32";
+    std::string manual_engine = parent_dir + "/" + stem + precision_str + ".engine";
+
+    if (fs::exists(manual_engine)) {
+        std::cout << "[INFO] Found manual engine: " << manual_engine << std::endl;
+        return manual_engine;
+    }
+
+    std::string engine_path = parent_dir + "/" + stem;
+    
     char hostname[1024];
     gethostname(hostname, sizeof(hostname));
     std::string suffix(hostname);
 
-    suffix.append("_GPU_" +
-                  get_devicename_from_deviceid(_optimization_params.gpu_id));
-
-    // TensorRT version
+    suffix.append("_GPU_" + get_devicename_from_deviceid(_optimization_params.gpu_id));
     suffix.append("_TRT" + std::to_string(NV_TENSORRT_VERSION));
-
-    // CUDA version
     suffix.append("_CUDA" + std::to_string(CUDART_VERSION));
-
-    // Batch size
     suffix.append("_" + std::to_string(_optimization_params.batch_size));
 
-    // int8, tf32, fp16, fp32
-    if (_optimization_params.int8)
+    if (_optimization_params.int8) {
         suffix.append("_INT8");
-    else
-    {
-        if (_optimization_params.tf32)
-            suffix.append("_TF32");
-        _optimization_params.fp16 ? suffix.append("_FP16")
-                                  : suffix.append("_FP32");
+    } else {
+        if (_optimization_params.tf32) suffix.append("_TF32");
+        _optimization_params.fp16 ? suffix.append("_FP16") : suffix.append("_FP32");
     }
 
-    // Engine path = parent_dir/model_name_hostname_GPU_device_name_TRT_version_CUDA_version_batch_size_int8_fp16_fp32.engine
     engine_path.append("_" + suffix + ".engine");
     return engine_path;
 }
-
 
 bool inference_backend::TensorRTInferenceEngine::file_exists(
         const std::string &name) const
@@ -278,6 +274,11 @@ void inference_backend::TensorRTInferenceEngine::_allocate_buffers()
             _output_idx.emplace_back(i);
             ++output_idx;
 
+            _host_outputs.clear();
+            _host_outputs.reserve(_output_dims.size());
+            for (size_t i = 0; i < _output_dims.size(); ++i) {
+                _host_outputs.emplace_back(get_size_by_dims(_output_dims[i])); // floats
+            }
 #if NVINFER_MAJOR == 8 && NVINFER_MINOR <= 5
             _logger->log(nvinfer1::ILogger::Severity::kINFO,
                          std::string("Found output layer with name: ")
@@ -310,7 +311,6 @@ void inference_backend::TensorRTInferenceEngine::_allocate_buffers()
 bool inference_backend::TensorRTInferenceEngine::_deserialize_engine(
         const std::string &engine_path)
 {
-    // Reference: https://docs.nvidia.com/deeplearning/tensorrt/developer-guide/index.html#perform_inference_c
     std::ifstream engine_file(engine_path, std::ios::binary);
     if (!engine_file)
     {
@@ -319,7 +319,6 @@ bool inference_backend::TensorRTInferenceEngine::_deserialize_engine(
         return false;
     }
 
-    // Read engine file
     std::vector<char> trt_model_stream;
     size_t size{0};
     engine_file.seekg(0, std::ios::end);
@@ -329,8 +328,6 @@ bool inference_backend::TensorRTInferenceEngine::_deserialize_engine(
     engine_file.read(trt_model_stream.data(), size);
     engine_file.close();
 
-    // Deserialize engine
-    // Runtime must outlive the engine. Keep it as a member
     _runtime = makeUnique(nvinfer1::createInferRuntime(*_logger));
     _engine = makeUnique(_runtime->deserializeCudaEngine(
             trt_model_stream.data(), trt_model_stream.size()));
@@ -341,7 +338,6 @@ bool inference_backend::TensorRTInferenceEngine::_deserialize_engine(
         return false;
     }
 
-    // Create execution context
     _context = makeUnique(_engine->createExecutionContext());
     if (!_context)
     {
@@ -357,23 +353,18 @@ bool inference_backend::TensorRTInferenceEngine::_deserialize_engine(
 void inference_backend::TensorRTInferenceEngine::_build_engine(
         const std::string &onnx_model_path)
 {
-    // Reference: https://docs.nvidia.com/deeplearning/tensorrt/developer-guide/index.html#c_topics
-    // Network builder
     auto builder = std::unique_ptr<nvinfer1::IBuilder>(
             nvinfer1::createInferBuilder(*_logger));
 
-    // Network definition
     uint32_t flag =
             1U << static_cast<uint32_t>(
                     nvinfer1::NetworkDefinitionCreationFlag::kEXPLICIT_BATCH);
     auto network = std::unique_ptr<nvinfer1::INetworkDefinition>(
             builder->createNetworkV2(flag));
 
-    // ONNX parser
     auto parser = std::unique_ptr<nvonnxparser::IParser>(
             nvonnxparser::createParser(*network, *_logger));
 
-    // Parse ONNX model
     int verbosity = static_cast<int>(_logSeverity);
     parser->parseFromFile(onnx_model_path.c_str(), verbosity);
     for (int32_t i = 0; i < parser->getNbErrors(); ++i)
@@ -382,8 +373,6 @@ void inference_backend::TensorRTInferenceEngine::_build_engine(
                      parser->getError(i)->desc());
     }
 
-    // Optimization profile
-    // TODO: Check more about optimization profiles
     auto config = std::unique_ptr<nvinfer1::IBuilderConfig>(
             builder->createBuilderConfig());
     auto profile = builder->createOptimizationProfile();
@@ -401,7 +390,6 @@ void inference_backend::TensorRTInferenceEngine::_build_engine(
     if (_optimization_params.int8)
 
     {
-        // TODO: Add int8 calibration
         _logger->log(nvinfer1::ILogger::Severity::kWARNING,
                      std::string("INT8 calibration is not supported yet. "
                                  "Switching to FP16 or FP32 calibration")
@@ -416,7 +404,6 @@ void inference_backend::TensorRTInferenceEngine::_build_engine(
             config->setFlag(nvinfer1::BuilderFlag::kTF32);
     }
 
-    // Build engine
     _logger->log(nvinfer1::ILogger::Severity::kINFO,
                  std::string("Building engine").c_str());
 
@@ -436,7 +423,6 @@ void inference_backend::TensorRTInferenceEngine::_build_engine(
         return;
     }
 
-    // Serialize engine
     _logger->log(nvinfer1::ILogger::Severity::kINFO,
                  std::string("Serializing engine").c_str());
     std::string engine_path = get_engine_path(onnx_model_path);
@@ -475,8 +461,6 @@ void inference_backend::TensorRTInferenceEngine::_build_engine(
 inference_backend::ModelPredictions
 inference_backend::TensorRTInferenceEngine::forward(const cv::Mat &input_image)
 {
-    // Reference: https://docs.nvidia.com/deeplearning/tensorrt/developer-guide/index.html#perform-inference
-
     if (!_buffers.size())
     {
         _logger->log(nvinfer1::ILogger::Severity::kERROR,
@@ -484,33 +468,40 @@ inference_backend::TensorRTInferenceEngine::forward(const cv::Mat &input_image)
         return ModelPredictions();
     }
 
-    // Create a blob from the image
     cv::Mat image_blob;
     cv::dnn::blobFromImage(input_image, image_blob, 1.0,
                            cv::Size(_input_dims[0].d[3], _input_dims[0].d[2]),
                            cv::Scalar(), false, false, CV_32F);
 
-    // Ensure image blob size matches input layer size
     assert(image_blob.total() == get_size_by_dims(_input_dims[0]));
 
-    // Copy image blob to CUDA input buffer
-    cudaMemcpyAsync(_buffers[_input_idx], image_blob.data,
-                get_size_by_dims(_input_dims[0], sizeof(float)),
-                cudaMemcpyHostToDevice, _cuda_stream);
+    CHECK_CUDA(cudaMemcpyAsync(_buffers[_input_idx], image_blob.ptr<float>(),
+        get_size_by_dims(_input_dims[0], sizeof(float)),
+        cudaMemcpyHostToDevice, _cuda_stream));
 
-    // Run inference
-    _context->executeV2(_buffers.data());
+    const char* in_name  = _engine->getIOTensorName(_input_idx);
+    _context->setTensorAddress(in_name, _buffers[_input_idx]);
 
-    // Copy CUDA output buffer to host
-    ModelPredictions predictions;
-    for (size_t i = 0; i < _output_idx.size(); ++i)
-    {
-        std::vector<float> output(get_size_by_dims(_output_dims[i]));
-        cudaMemcpyAsync(output.data(), _buffers[_output_idx[i]],
-                output.size() * sizeof(float), cudaMemcpyDeviceToHost, _cuda_stream);
-        predictions.emplace_back(output);
+    for (size_t k = 0; k < _output_idx.size(); ++k) {
+        const char* out_name = _engine->getIOTensorName(_output_idx[k]);
+        _context->setTensorAddress(out_name, _buffers[_output_idx[k]]);
     }
 
+    if (!_context->enqueueV3(_cuda_stream)) {
+        _logger->log(nvinfer1::ILogger::Severity::kERROR, "enqueueV3 failed");
+        return ModelPredictions();
+    }
+
+    for (size_t i = 0; i < _output_idx.size(); ++i) {
+        auto& out = _host_outputs[i];
+        CHECK_CUDA(cudaMemcpyAsync(out.data(), _buffers[_output_idx[i]],
+            out.size() * sizeof(float), cudaMemcpyDeviceToHost, _cuda_stream));
+    }
     cudaStreamSynchronize(_cuda_stream);
+
+    // return copies (still copies, but no allocation). Even better is return refs.
+    ModelPredictions predictions;
+    predictions.reserve(_host_outputs.size());
+    for (auto& out : _host_outputs) predictions.emplace_back(out);
     return predictions;
 }
