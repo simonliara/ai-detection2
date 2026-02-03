@@ -267,8 +267,11 @@ private:
         spdlog::info("YOLO: {} ms | ByteTrack: {} ms | tracks={} | tot={} ms",
                     yolo_ms, track_ms, tracks.size(), tot_ms);
 
-        static int frame_idx = 0;
-        cv::imwrite("output/frame_" + std::to_string(++frame_idx) + ".jpg", image);
+        // static int frame_idx = 0;
+        // cv::imwrite("output/frame_" + std::to_string(++frame_idx) + ".jpg", image);
+        
+        cv::imshow(kWinName, image);
+        cv::waitKey(1);
     }
 
 private:
