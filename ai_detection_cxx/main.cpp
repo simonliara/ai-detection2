@@ -1,4 +1,3 @@
-// databus_detector_main.cpp
 #include <atomic>
 #include <chrono>
 #include <csignal>
@@ -26,10 +25,12 @@
 #include "DataType.h"
 #include "track.h"
 
+#include "ByteTrack/BYTETracker.h"
+#include "ByteTrack/Object.h"
+
 static std::atomic<bool> g_running{true};
 static void onSignal(int) { g_running = false; }
 
-// ------------------------- Hardcoded config -------------------------
 static constexpr int kDomainId = 0;
 
 static const char* kCycloneDDSUri =
@@ -45,14 +46,14 @@ static const char* kCycloneDDSUri =
       "</Domain>"
     "</CycloneDDS>";
 
-static const std::string kYoloEngine = "yolo/weights/t2_static.fp16.engine";
-static constexpr float kConfThresh = 0.25f;
-static constexpr float kNmsThresh  = 0.45f;
+static const std::string kYoloEngine = "ai_detection_cxx/yolo/weights/yolo11s_static.fp16.engine";
+static constexpr float kConfThresh = 0.1f;
+static constexpr float kNmsThresh  = 0.7f;
 
-static const std::string kTrackerIni = "botsort/config/tracker.ini";
-static const std::string kGmcIni     = "botsort/config/gmc.ini";
-static const std::string kReidIni    = "botsort/config/reid.ini";
-static const std::string kReidOnnx   = "botsort/weights/osnet_x0_25_market1501.onnx"; 
+static const std::string kTrackerIni = "ai_detection_cxx/botsort/config/tracker.ini";
+static const std::string kGmcIni     = "ai_detection_cxx/botsort/config/gmc.ini";
+static const std::string kReidIni    = "ai_detection_cxx/botsort/config/reid.ini";
+static const std::string kReidOnnx   = "ai_detection_cxx/botsort/weights/osnet_x0_25_market1501.onnx"; 
 
 static inline cv::Rect clampRect(const cv::Rect& r, int W, int H) {
     int x = std::max(0, r.x);
@@ -121,7 +122,7 @@ static std::optional<cv::Mat> decodeTimedImage(const DataBus::SensorData::TimedI
         if ((int)data.size() < H * W * 3) return std::nullopt;
 
         cv::Mat view(H, W, CV_8UC3, (void*)data.data());
-        return view.clone(); // important
+        return view.clone();
     }
 
     if (im.encoding() == DataBus::SensorData::Encoding::JPEG) {
@@ -135,7 +136,6 @@ static std::optional<cv::Mat> decodeTimedImage(const DataBus::SensorData::TimedI
     return std::nullopt;
 }
 
-// ------------------------- Logger for TensorRT -------------------------
 class TrtLogger : public nvinfer1::ILogger {
 public:
     void log(Severity severity, const char* msg) noexcept override {
@@ -147,7 +147,7 @@ static void setCycloneEnvOnce() {
 #if defined(_WIN32)
     _putenv_s("CYCLONEDDS_URI", kCycloneDDSUri);
 #else
-    ::setenv("CYCLONEDDS_URI", kCycloneDDSUri, /*overwrite=*/1);
+    ::setenv("CYCLONEDDS_URI", kCycloneDDSUri, 1);
 #endif
 }
 
@@ -158,16 +158,17 @@ public:
       imageReader_(DataBus::Topics::SensorData::getImagesReader(participant_)),
       detWriter_(DataBus::Topics::Perception::getObjectDetectionWriter(participant_)),
       model_(kYoloEngine, g_trtLogger, kConfThresh, kNmsThresh),
-      botsort_(std::make_unique<BoTSORT>(kTrackerIni, kGmcIni, kReidIni, kReidOnnx))
+      botsort_(std::make_unique<BoTSORT>(kTrackerIni, kGmcIni, kReidIni, kReidOnnx)),
+      tracker_(std::make_unique<byte_track::BYTETracker>())
     {}
 
     void loop() {
         while (g_running) {
             bool gotAny = false;
 
+            auto t1 = std::chrono::high_resolution_clock::now();
             auto samples = imageReader_.take();
             for (auto& s : samples) {
-                std::cout << "got frmae" << std::endl;
                 gotAny = true;
                 if (!s.info().valid()) continue;
 
@@ -180,6 +181,11 @@ public:
 
             if (!gotAny) {
                 std::this_thread::sleep_for(std::chrono::milliseconds(5));
+            } 
+            else {
+                auto t2 = std::chrono::high_resolution_clock::now();
+                double loop_ms = std::chrono::duration<double, std::milli>(t2 - t1).count();
+                spdlog::info("Loop time: {} ms", loop_ms);
             }
         }
     }
@@ -190,7 +196,6 @@ private:
         if (bgr.empty()) return;
 
         cv::Mat image = bgr.clone();
-
         std::vector<YoloDetection> yoloDetections;
 
         auto t0 = std::chrono::high_resolution_clock::now();
@@ -199,29 +204,32 @@ private:
         model_.postprocess(yoloDetections);
         auto t1 = std::chrono::high_resolution_clock::now();
 
-        // --- BoTSORT ---
-        auto botDets = toBotSortDetections(yoloDetections, image.cols, image.rows, kConfThresh);
+        auto inputs = YOLOv11::toByteTrackObjects(yoloDetections, kConfThresh);
 
         auto t2 = std::chrono::high_resolution_clock::now();
-        auto tracks = botsort_->track(botDets, image);
+        auto tracks = tracker_->update(inputs); 
         auto t3 = std::chrono::high_resolution_clock::now();
 
         for (const auto& tp : tracks) {
             if (!tp) continue;
 
-            const int trackId = tp->track_id;
+            const int trackId = static_cast<int>(tp->getTrackId());
+            const auto& rect  = tp->getRect(); 
 
-            const auto tlwh = tp->get_tlwh();
-            if (tlwh.size() != 4) continue;
-
-            cv::Rect boxPx((int)tlwh[0], (int)tlwh[1], (int)tlwh[2], (int)tlwh[3]);
+            cv::Rect boxPx(
+                static_cast<int>(rect.x()), 
+                static_cast<int>(rect.y()), 
+                static_cast<int>(rect.width()), 
+                static_cast<int>(rect.height())
+            );
+            
             boxPx = clampRect(boxPx, image.cols, image.rows);
             if (boxPx.area() <= 0) continue;
 
-            const float conf = tp->get_score();
-            const int classId = (int)tp->get_class_id();
+            const float conf = tp->getScore();
+            const int classId = tp->getClassId();
 
-            std::string className = classIdToName(classId);
+            std::string className = model_.getClassNames()[classId];
 
             auto it = trackClass_.find(trackId);
             if (it == trackClass_.end()) {
@@ -254,17 +262,13 @@ private:
         auto tb = std::chrono::high_resolution_clock::now();
         double yolo_ms  = std::chrono::duration<double, std::milli>(t1 - t0).count();
         double track_ms = std::chrono::duration<double, std::milli>(t3 - t2).count();
-        double tot_ms = std::chrono::duration<double, std::milli>(tb - ta).count();
+        double tot_ms   = std::chrono::duration<double, std::milli>(tb - ta).count();
 
-        std::printf("YOLO: %6.2f ms | Track: %6.2f ms | dets=%zu tracks=%zu | tot=%6.2f\n",
-                    yolo_ms, track_ms, botDets.size(), tracks.size(), tot_ms);
+        spdlog::info("YOLO: {} ms | ByteTrack: {} ms | tracks={} | tot={} ms",
+                    yolo_ms, track_ms, tracks.size(), tot_ms);
 
-        if (kShowUi) {
-            cv::imshow(kWinName, image);
-            if (cv::waitKey(1) == 27) {
-                g_running = false;
-            }
-        }
+        static int frame_idx = 0;
+        cv::imwrite("output/frame_" + std::to_string(++frame_idx) + ".jpg", image);
     }
 
 private:
@@ -274,6 +278,8 @@ private:
 
     YOLOv11 model_;
     std::unique_ptr<BoTSORT> botsort_;
+    bool use_botsort_ = true;
+    std::unique_ptr<byte_track::BYTETracker> tracker_;
     std::unordered_map<int, std::string> trackClass_;
     static constexpr bool kShowUi = true;
     static constexpr const char* kWinName = "yolo+botsort";
@@ -283,7 +289,6 @@ int main() {
     std::signal(SIGINT, onSignal);
     std::signal(SIGTERM, onSignal);
 
-    // Must be set BEFORE participant is created
     setCycloneEnvOnce();
 
     spdlog::info("Starting DataBus detector (domain={}, iface=127.0.0.1)", kDomainId);
