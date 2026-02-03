@@ -29,8 +29,9 @@ endif()
 
 set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
 
+set(Eigen3_DIR "${CMAKE_CURRENT_SOURCE_DIR}/external/eigen_339/share/eigen3/cmake")
+find_package(Eigen3 3.3.9 REQUIRED NO_MODULE)
 find_package(OpenCV REQUIRED)
-find_package(Eigen3 REQUIRED)
 find_package(CUDAToolkit REQUIRED)
 
 set(TENSORRT_LIB_NAMES nvinfer nvinfer_plugin nvonnxparser)
@@ -82,11 +83,12 @@ add_subdirectory(external/spdlog)
 
 add_executable(${PROJECT_NAME} ai_detection_cxx/main.cpp)
 
-target_compile_definitions(${PROJECT_NAME} PRIVATE API_EXPORTS)
+target_compile_definitions(${PROJECT_NAME} PRIVATE API_EXPORTS EIGEN_MPL2_ONLY)
 
 target_include_directories(${PROJECT_NAME} PRIVATE
   ${TENSORRT_INCLUDE_DIR}
   ${CMAKE_CURRENT_SOURCE_DIR}/ai_detection_cxx/botsort/include
+  ${EIGEN3_INCLUDE_DIRS}
 )
 
 target_link_libraries(${PROJECT_NAME} PRIVATE

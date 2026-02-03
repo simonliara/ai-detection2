@@ -12,6 +12,7 @@ manifest.sh
 output
 runs
 
-yolo/weights/*.engine
-yolo/weights/*.onnx
-botsort/weights/*.engine
+ai_detection_cxx/yolo/weights/*.engine
+ai_detection_cxx/yolo/weights/*.onnx
+ai_detection_cxx/botsort/weights/*.engine
+external/eigen_339/
