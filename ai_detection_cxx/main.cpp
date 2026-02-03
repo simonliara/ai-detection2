@@ -83,12 +83,6 @@ static inline void rectToXywhn(const cv::Rect& boxPx, int imgW, int imgH,
     sy = clamp01(h / (double)imgH);
 }
 
-static inline std::string classIdToName(int cid) {
-    if (cid == 0) return "person";
-    if (cid == 2 || cid == 7) return "vehicle";
-    return "unknown";
-}
-
 static inline std::vector<Detection> toBotSortDetections(
     const std::vector<YoloDetection>& yolo,
     int imgW,
