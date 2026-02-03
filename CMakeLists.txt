@@ -74,9 +74,9 @@ if(TRT_LIB_nvparsers)
     list(APPEND TENSORRT_LIBS ${TRT_LIB_nvparsers})
 endif()
 
-add_subdirectory(botsort)
-add_subdirectory(yolo)
-add_subdirectory(bytetrack)
+add_subdirectory(ai_detection_cxx/botsort)
+add_subdirectory(ai_detection_cxx/yolo)
+add_subdirectory(ai_detection_cxx/bytetrack)
 add_subdirectory(external/data-bus)
 add_subdirectory(external/spdlog)
 
@@ -86,7 +86,7 @@ target_compile_definitions(${PROJECT_NAME} PRIVATE API_EXPORTS)
 
 target_include_directories(${PROJECT_NAME} PRIVATE
   ${TENSORRT_INCLUDE_DIR}
-  ${CMAKE_CURRENT_SOURCE_DIR}/botsort/include
+  ${CMAKE_CURRENT_SOURCE_DIR}/ai_detection_cxx/botsort/include
 )
 
 target_link_libraries(${PROJECT_NAME} PRIVATE

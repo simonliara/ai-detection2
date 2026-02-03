@@ -48,6 +48,7 @@ public:
         const std::vector<YoloDetection>& yolo, 
         float conf_thresh = 0.25f
     );
+    std::vector<std::string> getClassNames() const;
 
 private:
     class Impl;

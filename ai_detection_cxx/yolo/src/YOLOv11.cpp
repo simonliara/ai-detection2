@@ -336,6 +336,10 @@ YoloStats YOLOv11::getStats() const {
     return stats;
 }
 
+std::vector<std::string> YOLOv11::getClassNames() const {
+    return pImpl->class_names;
+}
+
 std::vector<byte_track::Object> YOLOv11::toByteTrackObjects(
     const std::vector<YoloDetection>& yolo,
     float conf_thresh

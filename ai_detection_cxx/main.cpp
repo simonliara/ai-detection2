@@ -46,14 +46,14 @@ static const char* kCycloneDDSUri =
       "</Domain>"
     "</CycloneDDS>";
 
-static const std::string kYoloEngine = "yolo/weights/yolo11s_static.fp16.engine";
+static const std::string kYoloEngine = "ai_detection_cxx/yolo/weights/yolo11s_static.fp16.engine";
 static constexpr float kConfThresh = 0.25f;
 static constexpr float kNmsThresh  = 0.45f;
 
-static const std::string kTrackerIni = "botsort/config/tracker.ini";
-static const std::string kGmcIni     = "botsort/config/gmc.ini";
-static const std::string kReidIni    = "botsort/config/reid.ini";
-static const std::string kReidOnnx   = "botsort/weights/osnet_x0_25_market1501.onnx"; 
+static const std::string kTrackerIni = "ai_detection_cxx/botsort/config/tracker.ini";
+static const std::string kGmcIni     = "ai_detection_cxx/botsort/config/gmc.ini";
+static const std::string kReidIni    = "ai_detection_cxx/botsort/config/reid.ini";
+static const std::string kReidOnnx   = "ai_detection_cxx/botsort/weights/osnet_x0_25_market1501.onnx"; 
 
 static inline cv::Rect clampRect(const cv::Rect& r, int W, int H) {
     int x = std::max(0, r.x);
@@ -229,7 +229,7 @@ private:
             const float conf = tp->getScore();
             const int classId = tp->getClassId();
 
-            std::string className = classIdToName(classId);
+            std::string className = model_.getClassNames()[classId];
 
             auto it = trackClass_.find(trackId);
             if (it == trackClass_.end()) {
