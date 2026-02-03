@@ -76,6 +76,7 @@ endif()
 
 add_subdirectory(botsort)
 add_subdirectory(yolo)
+add_subdirectory(bytetrack)
 add_subdirectory(external/data-bus)
 add_subdirectory(external/spdlog)
 

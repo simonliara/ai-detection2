@@ -25,6 +25,9 @@
 #include "DataType.h"
 #include "track.h"
 
+#include "ByteTrack/BYTETracker.h"
+#include "ByteTrack/Object.h"
+
 static std::atomic<bool> g_running{true};
 static void onSignal(int) { g_running = false; }
 
@@ -155,7 +158,8 @@ public:
       imageReader_(DataBus::Topics::SensorData::getImagesReader(participant_)),
       detWriter_(DataBus::Topics::Perception::getObjectDetectionWriter(participant_)),
       model_(kYoloEngine, g_trtLogger, kConfThresh, kNmsThresh),
-      botsort_(std::make_unique<BoTSORT>(kTrackerIni, kGmcIni, kReidIni, kReidOnnx))
+      botsort_(std::make_unique<BoTSORT>(kTrackerIni, kGmcIni, kReidIni, kReidOnnx)),
+      tracker_(std::make_unique<byte_track::BYTETracker>(fps, track_buffer))
     {}
 
     void loop() {
@@ -192,7 +196,6 @@ private:
         if (bgr.empty()) return;
 
         cv::Mat image = bgr.clone();
-
         std::vector<YoloDetection> yoloDetections;
 
         auto t0 = std::chrono::high_resolution_clock::now();
@@ -201,26 +204,30 @@ private:
         model_.postprocess(yoloDetections);
         auto t1 = std::chrono::high_resolution_clock::now();
 
-        auto botDets = toBotSortDetections(yoloDetections, image.cols, image.rows, kConfThresh);
+        auto inputs = YOLOv11::toByteTrackObjects(yoloDetections, kConfThresh);
 
         auto t2 = std::chrono::high_resolution_clock::now();
-        auto tracks = botsort_->track(botDets, image);
+        auto tracks = tracker_->update(inputs); 
         auto t3 = std::chrono::high_resolution_clock::now();
 
         for (const auto& tp : tracks) {
             if (!tp) continue;
 
-            const int trackId = tp->track_id;
+            const int trackId = static_cast<int>(tp->getTrackId());
+            const auto& rect  = tp->getRect(); 
 
-            const auto tlwh = tp->get_tlwh();
-            if (tlwh.size() != 4) continue;
-
-            cv::Rect boxPx((int)tlwh[0], (int)tlwh[1], (int)tlwh[2], (int)tlwh[3]);
+            cv::Rect boxPx(
+                static_cast<int>(rect.x()), 
+                static_cast<int>(rect.y()), 
+                static_cast<int>(rect.width()), 
+                static_cast<int>(rect.height())
+            );
+            
             boxPx = clampRect(boxPx, image.cols, image.rows);
             if (boxPx.area() <= 0) continue;
 
-            const float conf = tp->get_score();
-            const int classId = (int)tp->get_class_id();
+            const float conf = tp->getScore();
+            const int classId = tp->getClassId();
 
             std::string className = classIdToName(classId);
 
@@ -255,22 +262,13 @@ private:
         auto tb = std::chrono::high_resolution_clock::now();
         double yolo_ms  = std::chrono::duration<double, std::milli>(t1 - t0).count();
         double track_ms = std::chrono::duration<double, std::milli>(t3 - t2).count();
-        double tot_ms = std::chrono::duration<double, std::milli>(tb - ta).count();
+        double tot_ms   = std::chrono::duration<double, std::milli>(tb - ta).count();
 
-        std::printf("YOLO: %6.2f ms | Track: %6.2f ms | dets=%zu tracks=%zu | tot=%6.2f\n",
-                    yolo_ms, track_ms, botDets.size(), tracks.size(), tot_ms);
+        spdlog::info("YOLO: {} ms | ByteTrack: {} ms | tracks={} | tot={} ms",
+                    yolo_ms, track_ms, tracks.size(), tot_ms);
 
-        // if (kShowUi) {
-        //     cv::imshow(kWinName, image);
-        //     if (cv::waitKey(1) == 27) {
-        //         g_running = false;
-        //     }
-        // }
-
-        //save
         static int frame_idx = 0;
-        frame_idx++;
-        cv::imwrite("output/frame_" + std::to_string(frame_idx) + ".jpg", image);
+        cv::imwrite("output/frame_" + std::to_string(++frame_idx) + ".jpg", image);
     }
 
 private:
@@ -280,6 +278,10 @@ private:
 
     YOLOv11 model_;
     std::unique_ptr<BoTSORT> botsort_;
+    bool use_botsort_ = true;
+    int fps = 30; 
+    int track_buffer = 30; 
+    std::unique_ptr<byte_track::BYTETracker> tracker_;
     std::unordered_map<int, std::string> trackClass_;
     static constexpr bool kShowUi = true;
     static constexpr const char* kWinName = "yolo+botsort";

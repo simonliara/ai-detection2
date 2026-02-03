@@ -259,6 +259,7 @@ void YOLOv11::preprocess(cv::Mat& image) {
                     pImpl->gpu_buffers[0], pImpl->input_w, pImpl->input_h,
                     pImpl->stream);
 
+    // CHECK_CUDA(cudaStreamSynchronize(pImpl->stream));
     cudaEventRecord(pImpl->pre_event, pImpl->stream);
 }
 
@@ -335,6 +336,30 @@ YoloStats YOLOv11::getStats() const {
     return stats;
 }
 
+std::vector<byte_track::Object> YOLOv11::toByteTrackObjects(
+    const std::vector<YoloDetection>& yolo,
+    float conf_thresh
+) {
+    std::vector<byte_track::Object> out;
+    out.reserve(yolo.size());
+
+    for (const auto& d : yolo) {
+        if (d.conf < conf_thresh) continue;
+
+        out.emplace_back(
+            byte_track::Rect<float>(
+                static_cast<float>(d.bbox.x),
+                static_cast<float>(d.bbox.y),
+                static_cast<float>(d.bbox.width),
+                static_cast<float>(d.bbox.height)
+            ),
+            d.class_id,
+            d.conf
+        );
+    }
+    return out;
+}
+
 void YOLOv11::draw(cv::Mat& image, const std::vector<YoloDetection>& output)
 {
     for (const auto& det : output) {
@@ -394,5 +419,47 @@ void YOLOv11::draw(cv::Mat& image, const std::vector<std::shared_ptr<Track>>& tr
         cv::rectangle(image, label_bg, track_colors[id], cv::FILLED);
         cv::putText(image, label, cv::Point(box.x + 2, label_bg.y + labelSize.height), 
                     cv::FONT_HERSHEY_SIMPLEX, 0.6, cv::Scalar(0,0,0), 1);
+    }
+}
+
+void YOLOv11::draw(cv::Mat& image, const std::vector<std::shared_ptr<byte_track::STrack>>& tracks)
+{
+    static std::map<int, cv::Scalar> track_colors;
+    
+    for (const auto& t : tracks) {
+        if (!t) continue;
+        
+        int id = t->getTrackId(); 
+        int classId = t->getClassId();
+        const auto& rect = t->getRect();
+
+        if (track_colors.find(id) == track_colors.end()) {
+            cv::RNG rng(id * 99); 
+            track_colors[id] = cv::Scalar(rng.uniform(0, 255), rng.uniform(0, 255), rng.uniform(0, 255));
+        }
+
+        cv::Rect box((int)rect.x(), (int)rect.y(), (int)rect.width(), (int)rect.height());
+        box &= cv::Rect(0, 0, image.cols, image.rows);
+
+        if(box.width <= 0 || box.height <= 0) continue;
+
+        cv::rectangle(image, box, track_colors[id], 2);
+
+        std::string className = (classId >= 0 && classId < pImpl->class_names.size()) 
+                                ? pImpl->class_names[classId] 
+                                : "ID: " + std::to_string(id);
+        
+        std::string label = className + " #" + std::to_string(id);
+        
+        int baseLine = 0;
+        cv::Size labelSize = cv::getTextSize(label, cv::FONT_HERSHEY_SIMPLEX, 0.5, 1, &baseLine);
+        
+        int label_y = std::max(box.y, labelSize.height + 5);
+        cv::Rect label_bg(box.x, label_y - labelSize.height - 5, 
+                          labelSize.width + 4, labelSize.height + 4);
+                          
+        cv::rectangle(image, label_bg, track_colors[id], cv::FILLED);
+        cv::putText(image, label, cv::Point(box.x + 2, label_y - 2), 
+                    cv::FONT_HERSHEY_SIMPLEX, 0.5, cv::Scalar(255, 255, 255), 1);
     }
 }

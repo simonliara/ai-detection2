@@ -156,7 +156,7 @@ int main(int argc, char** argv) {
         msg.image(std::move(img));
 
         writer.write(msg);
-        printf("Published frame: %ux%u\n", img.width(), img.height());
+        spdlog::info("Published frame: {}x{}", img.width(), img.height());
 
         // cv::imshow("Publisher Preview", frame);
         // if (cv::waitKey(1) == 27) break;
