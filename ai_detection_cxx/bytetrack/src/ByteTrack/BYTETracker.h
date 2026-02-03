@@ -18,9 +18,9 @@ public:
     using STrackPtr = std::shared_ptr<STrack>;
 
     BYTETracker(const int& frame_rate = 30,
-                const int& track_buffer = 30,
-                const float& track_thresh = 0.5,
-                const float& high_thresh = 0.6,
+                const int& track_buffer = 60,
+                const float& track_thresh = 0.3,
+                const float& high_thresh = 0.5,
                 const float& match_thresh = 0.8);
     ~BYTETracker();
 

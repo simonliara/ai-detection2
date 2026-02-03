@@ -47,8 +47,8 @@ static const char* kCycloneDDSUri =
     "</CycloneDDS>";
 
 static const std::string kYoloEngine = "ai_detection_cxx/yolo/weights/yolo11s_static.fp16.engine";
-static constexpr float kConfThresh = 0.25f;
-static constexpr float kNmsThresh  = 0.45f;
+static constexpr float kConfThresh = 0.1f;
+static constexpr float kNmsThresh  = 0.7f;
 
 static const std::string kTrackerIni = "ai_detection_cxx/botsort/config/tracker.ini";
 static const std::string kGmcIni     = "ai_detection_cxx/botsort/config/gmc.ini";
@@ -159,7 +159,7 @@ public:
       detWriter_(DataBus::Topics::Perception::getObjectDetectionWriter(participant_)),
       model_(kYoloEngine, g_trtLogger, kConfThresh, kNmsThresh),
       botsort_(std::make_unique<BoTSORT>(kTrackerIni, kGmcIni, kReidIni, kReidOnnx)),
-      tracker_(std::make_unique<byte_track::BYTETracker>(fps, track_buffer))
+      tracker_(std::make_unique<byte_track::BYTETracker>())
     {}
 
     void loop() {
@@ -279,8 +279,6 @@ private:
     YOLOv11 model_;
     std::unique_ptr<BoTSORT> botsort_;
     bool use_botsort_ = true;
-    int fps = 30; 
-    int track_buffer = 30; 
     std::unique_ptr<byte_track::BYTETracker> tracker_;
     std::unordered_map<int, std::string> trackClass_;
     static constexpr bool kShowUi = true;

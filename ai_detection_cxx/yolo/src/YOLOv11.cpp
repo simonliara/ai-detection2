@@ -224,7 +224,6 @@ void YOLOv11::Impl::generateColors() {
 YOLOv11::YOLOv11(std::string model_path, nvinfer1::ILogger& logger, float conf_thresh, float nms_thresh)
     : pImpl(std::make_unique<Impl>(model_path, logger, conf_thresh, nms_thresh)) 
 {
-    // for(int i=0; i<5; ++i) this->infer();
 }
 
 YOLOv11::~YOLOv11() = default;
@@ -247,10 +246,6 @@ void YOLOv11::preprocess(cv::Mat& image) {
         std::cerr << "Unsupported input type\n";
         return;
     }
-
-    // If step != cols*3, memcpy2DAsync handles it, so clone is optional now.
-    // But it doesn’t hurt to keep:
-    // if (!bgr.isContinuous()) bgr = bgr.clone();
 
     pImpl->last_img_w = bgr.cols;
     pImpl->last_img_h = bgr.rows;
