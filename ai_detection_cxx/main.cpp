@@ -106,30 +106,6 @@ static inline std::vector<Detection> toBotSortDetections(
     return out;
 }
 
-static std::optional<cv::Mat> decodeTimedImage(const DataBus::SensorData::TimedImage& msg) {
-    const auto& im = msg.image();
-
-    if (im.encoding() == DataBus::SensorData::Encoding::BGR24) {
-        const int H = (int)im.height();
-        const int W = (int)im.width();
-        const auto& data = im.data();
-        if ((int)data.size() < H * W * 3) return std::nullopt;
-
-        cv::Mat view(H, W, CV_8UC3, (void*)data.data());
-        return view.clone();
-    }
-
-    if (im.encoding() == DataBus::SensorData::Encoding::JPEG) {
-        const auto& data = im.data();
-        cv::Mat buf(1, (int)data.size(), CV_8UC1, (void*)data.data());
-        cv::Mat decoded = cv::imdecode(buf, cv::IMREAD_COLOR);
-        if (decoded.empty()) return std::nullopt;
-        return decoded;
-    }
-
-    return std::nullopt;
-}
-
 class TrtLogger : public nvinfer1::ILogger {
 public:
     void log(Severity severity, const char* msg) noexcept override {
@@ -186,45 +162,32 @@ public:
 
 private:
     void processFrame(const cv::Mat& bgr, const DataBus::SensorData::TimedImage& timedImage) {
-        auto ta = std::chrono::high_resolution_clock::now();
         if (bgr.empty()) return;
+        auto ta = std::chrono::high_resolution_clock::now();
 
-        cv::Mat image = bgr.clone();
         std::vector<YoloDetection> yoloDetections;
-
         auto t0 = std::chrono::high_resolution_clock::now();
-        model_.preprocess(image);
+        model_.preprocess(bgr);
         model_.infer();
         model_.postprocess(yoloDetections);
         auto t1 = std::chrono::high_resolution_clock::now();
 
         auto inputs = YOLOv11::toByteTrackObjects(yoloDetections, kConfThresh);
-
         auto t2 = std::chrono::high_resolution_clock::now();
         auto tracks = tracker_->update(inputs); 
         auto t3 = std::chrono::high_resolution_clock::now();
 
         for (const auto& tp : tracks) {
             if (!tp) continue;
-
             const int trackId = static_cast<int>(tp->getTrackId());
             const auto& rect  = tp->getRect(); 
 
-            cv::Rect boxPx(
-                static_cast<int>(rect.x()), 
-                static_cast<int>(rect.y()), 
-                static_cast<int>(rect.width()), 
-                static_cast<int>(rect.height())
-            );
-            
-            boxPx = clampRect(boxPx, image.cols, image.rows);
+            cv::Rect boxPx = clampRect(cv::Rect(rect.x(), rect.y(), rect.width(), rect.height()), bgr.cols, bgr.rows);
             if (boxPx.area() <= 0) continue;
 
-            const float conf = tp->getScore();
-            const int classId = tp->getClassId();
-
-            std::string className = model_.getClassNames()[classId];
-
+            int classId = tp->getClassId();
+            std::string className = (classId < model_.getClassNames().size()) ? model_.getClassNames()[classId] : "unknown";
+            
             auto it = trackClass_.find(trackId);
             if (it == trackClass_.end()) {
                 if (className == "unknown") continue;
@@ -234,38 +197,55 @@ private:
             }
 
             double cx, cy, sx, sy;
-            rectToXywhn(boxPx, image.cols, image.rows, cx, cy, sx, sy);
+            rectToXywhn(boxPx, bgr.cols, bgr.rows, cx, cy, sx, sy);
 
             DataBus::Perception::ObjectDetection msg;
             msg.id((uint64_t)trackId);
             msg.sourceIdentity(timedImage.sourceIdentity());
             msg.time(timedImage.imageTime());
             msg.classification(className);
-            msg.confidenceScore(conf);
-            msg.referenceFrame(timedImage.referenceFrame());
+            msg.confidenceScore(tp->getScore());
             msg.centerX(cx);
             msg.centerY(cy);
             msg.sizeX(sx);
             msg.sizeY(sy);
-
             detWriter_.write(msg);
         }
 
-        model_.draw(image, tracks);
+        cv::Mat vizImage = bgr.clone(); 
+        model_.draw(vizImage, tracks);
 
         auto tb = std::chrono::high_resolution_clock::now();
+        
         double yolo_ms  = std::chrono::duration<double, std::milli>(t1 - t0).count();
         double track_ms = std::chrono::duration<double, std::milli>(t3 - t2).count();
-        double tot_ms   = std::chrono::duration<double, std::milli>(tb - ta).count();
-
-        spdlog::info("YOLO: {} ms | ByteTrack: {} ms | tracks={} | tot={} ms",
-                    yolo_ms, track_ms, tracks.size(), tot_ms);
+        spdlog::info("Inference: {:.2f}ms | Track: {:.2f}ms | Total: {:.2f}ms", yolo_ms, track_ms, 
+                    std::chrono::duration<double, std::milli>(tb - ta).count());
 
         // static int frame_idx = 0;
-        // cv::imwrite("output/frame_" + std::to_string(++frame_idx) + ".jpg", image);
-        
-        cv::imshow(kWinName, image);
-        cv::waitKey(1);
+        // cv::imwrite("output/frame_" + std::to_string(++frame_idx) + ".jpg", vizImage);
+    }
+
+    std::optional<cv::Mat> decodeTimedImage(const DataBus::SensorData::TimedImage& msg) {
+        const auto& im = msg.image();
+        const auto& data = im.data();
+        if (data.empty()) return std::nullopt;
+
+        if (im.encoding() == DataBus::SensorData::Encoding::BGR24) {
+            const int H = static_cast<int>(im.height());
+            const int W = static_cast<int>(im.width());
+            if (data.size() < static_cast<size_t>(H * W * 3)) return std::nullopt;
+            return cv::Mat(H, W, CV_8UC3, const_cast<unsigned char*>(reinterpret_cast<const unsigned char*>(data.data())));
+        }
+
+        if (im.encoding() == DataBus::SensorData::Encoding::JPEG) {
+            cv::Mat rawData(1, static_cast<int>(data.size()), CV_8UC1, (void*)data.data());
+            cv::Mat decoded = cv::imdecode(rawData, cv::IMREAD_COLOR);
+            if (decoded.empty()) return std::nullopt;
+            return decoded;
+        }
+
+        return std::nullopt;
     }
 
 private:
@@ -278,8 +258,9 @@ private:
     bool use_botsort_ = true;
     std::unique_ptr<byte_track::BYTETracker> tracker_;
     std::unordered_map<int, std::string> trackClass_;
+    cv::Mat jpegScratchBuffer_;
     static constexpr bool kShowUi = true;
-    static constexpr const char* kWinName = "yolo+botsort";
+    static constexpr const char* kWinName = "yolo+tracking";
 };
 
 int main() {

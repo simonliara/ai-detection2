@@ -231,7 +231,7 @@ YOLOv11::~YOLOv11() = default;
 float YOLOv11::getConfThreshold() const { return pImpl->conf_threshold; }
 float YOLOv11::getNMSThreshold() const { return pImpl->nms_threshold; }
 
-void YOLOv11::preprocess(cv::Mat& image) {
+void YOLOv11::preprocess(const cv::Mat& image) {
     cudaEventRecord(pImpl->start_event, pImpl->stream);
     if (image.empty()) return;
 

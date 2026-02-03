@@ -33,7 +33,7 @@ public:
     YOLOv11(std::string model_path, nvinfer1::ILogger& logger, float conf_thresh, float nms_thresh);
     ~YOLOv11();
 
-    void preprocess(cv::Mat& image);
+    void preprocess(const cv::Mat& image);
     void infer();
     void postprocess(std::vector<YoloDetection>& output);
     YoloStats getStats() const;
