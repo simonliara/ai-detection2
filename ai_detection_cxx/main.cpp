@@ -177,10 +177,12 @@ public:
 
             if (!gotAny) {
                 std::this_thread::sleep_for(std::chrono::milliseconds(5));
+            } 
+            else {
+                auto t2 = std::chrono::high_resolution_clock::now();
+                double loop_ms = std::chrono::duration<double, std::milli>(t2 - t1).count();
+                spdlog::info("Loop time: {} ms", loop_ms);
             }
-            auto t2 = std::chrono::high_resolution_clock::now();
-            double loop_ms = std::chrono::duration<double, std::milli>(t2 - t1).count();
-            spdlog::info("Loop time: {} ms", loop_ms);
         }
     }
 
@@ -264,6 +266,11 @@ private:
         //         g_running = false;
         //     }
         // }
+
+        //save
+        static int frame_idx = 0;
+        frame_idx++;
+        cv::imwrite("output/frame_" + std::to_string(frame_idx) + ".jpg", image);
     }
 
 private:

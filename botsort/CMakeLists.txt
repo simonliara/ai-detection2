@@ -22,7 +22,7 @@ target_include_directories(${PROJECT_NAME} PUBLIC
 
 find_package(OpenCV REQUIRED)
 target_include_directories(${PROJECT_NAME} PUBLIC ${OpenCV_INCLUDE_DIRS})
-target_link_libraries(${PROJECT_NAME} ${OpenCV_LIBS})
+target_link_libraries(${PROJECT_NAME} ${OpenCV_LIBS} spdlog::spdlog)
 
 find_package(Eigen3 REQUIRED)
 target_include_directories(${PROJECT_NAME} PUBLIC ${EIGEN3_INCLUDE_DIR})

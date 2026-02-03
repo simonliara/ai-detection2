@@ -10,6 +10,7 @@
 #include <stdexcept>
 #include <string>
 #include <vector>
+#include <spdlog/spdlog.h>
 
 static inline void checkCuda(cudaError_t e, const char* msg) {
     if (e != cudaSuccess) throw std::runtime_error(std::string(msg) + ": " + cudaGetErrorString(e));
@@ -19,7 +20,26 @@ class TrtLogger : public nvinfer1::ILogger {
 public:
     explicit TrtLogger(Severity s = Severity::kINFO) : sev_(s) {}
     void log(Severity severity, const char* msg) noexcept override {
-        if (severity <= sev_) std::cout << msg << std::endl;
+        if (severity <= sev_) {
+            switch (severity) {
+                case Severity::kINTERNAL_ERROR:
+                case Severity::kERROR:
+                    spdlog::error("[TRT] {}", msg);
+                    break;
+                case Severity::kWARNING:
+                    spdlog::warn("[TRT] {}", msg);
+                    break;
+                case Severity::kINFO:
+                    spdlog::info("[TRT] {}", msg);
+                    break;
+                case Severity::kVERBOSE:
+                    spdlog::debug("[TRT] {}", msg);
+                    break;
+                default:
+                    spdlog::info("[TRT] {}", msg);
+                    break;
+            }
+        }
     }
 private:
     Severity sev_;
@@ -170,12 +190,6 @@ int main(int argc, char** argv) {
             config->setFlag(nvinfer1::BuilderFlag::kINT8);
             std::cerr << "[WARN] INT8 selected. You need Q/DQ ONNX or an INT8 calibrator.\n";
         }
-
-        // uint32_t tactics = config->getTacticSources();
-        // tactics &= ~(1U << static_cast<uint32_t>(nvinfer1::TacticSource::kCUDNN));
-        // tactics &= ~(1U << static_cast<uint32_t>(nvinfer1::TacticSource::kCUBLAS));
-        // config->setTacticSources(tactics);
-        // std::cout << "[INFO] Restricted tactic sources to avoid cuTensor errors on Jetson." << std::endl;
         
         TrtUnique<nvonnxparser::IParser> parser(nvonnxparser::createParser(*network, logger));
         if (!parser) throw std::runtime_error("createParser failed");
@@ -235,19 +249,20 @@ int main(int argc, char** argv) {
                     throw std::runtime_error(std::string("setDimensions failed for input: ") + name);
                 }
 
-                std::cout << "[INFO] Profile for " << name
-                          << " MIN=[" << dMin.d[0] << "," << dMin.d[1] << "," << dMin.d[2] << "," << dMin.d[3] << "]"
-                          << " OPT=[" << dOpt.d[0] << "," << dOpt.d[1] << "," << dOpt.d[2] << "," << dOpt.d[3] << "]"
-                          << " MAX=[" << dMax.d[0] << "," << dMax.d[1] << "," << dMax.d[2] << "," << dMax.d[3] << "]"
-                          << "\n";
+                spdlog::info("Profile for {} MIN=[{},{},{},{}] OPT=[{},{},{},{}] MAX=[{},{},{},{}]",
+                    name,
+                    dMin.d[0], dMin.d[1], dMin.d[2], dMin.d[3],
+                    dOpt.d[0], dOpt.d[1], dOpt.d[2], dOpt.d[3],
+                    dMax.d[0], dMax.d[1], dMax.d[2], dMax.d[3]);
             }
 
             config->addOptimizationProfile(profile);
         } else {
             for (int i = 0; i < network->getNbInputs(); ++i) {
                 auto d = network->getInput(i)->getDimensions();
-                std::cout << "[INFO] Static input " << network->getInput(i)->getName()
-                          << " dims=[" << d.d[0] << "," << d.d[1] << "," << d.d[2] << "," << d.d[3] << "]\n";
+                spdlog::debug("Static input {} dims=[{},{},{},{}]",
+                    network->getInput(i)->getName(),
+                    d.d[0], d.d[1], d.d[2], d.d[3]);
             }
         }
 
@@ -256,12 +271,12 @@ int main(int argc, char** argv) {
 
         writeFile(outPath, plan->data(), plan->size());
 
-        std::cout << "[OK] Wrote engine: " << outPath
-                  << " (precision=" << precisionName(precision)
-                  << ", gpu=" << gpuId
-                  << ", workspaceMB=" << workspaceMB
-                  << ", dynamic=" << (needProfile ? "yes" : "no")
-                  << ")\n";
+        spdlog::info("Wrote engine: {} (precision={}, gpu={}, workspaceMB={}, dynamic={})",
+            outPath,
+            precisionName(precision),
+            gpuId,
+            workspaceMB,
+            needProfile ? "yes" : "no");
         return 0;
     } catch (const std::exception& e) {
         std::cerr << "[FATAL] " << e.what() << "\n";

@@ -259,7 +259,6 @@ void YOLOv11::preprocess(cv::Mat& image) {
                     pImpl->gpu_buffers[0], pImpl->input_w, pImpl->input_h,
                     pImpl->stream);
 
-    // CHECK_CUDA(cudaStreamSynchronize(pImpl->stream));
     cudaEventRecord(pImpl->pre_event, pImpl->stream);
 }
 

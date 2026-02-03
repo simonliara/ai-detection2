@@ -40,7 +40,8 @@ target_link_libraries(${PROJECT_NAME} PUBLIC
   botsort
   ${OpenCV_LIBS}
   CUDA::cudart
-  ${TENSORRT_LIBS}       
+  ${TENSORRT_LIBS}
+  spdlog::spdlog       
 )
 
 add_executable(onnx2engine src/onnx2engine.cpp)
@@ -51,7 +52,8 @@ target_include_directories(onnx2engine PRIVATE
 
 target_link_libraries(onnx2engine PRIVATE
     CUDA::cudart
-    ${TENSORRT_LIBS}       
+    ${TENSORRT_LIBS}
+    spdlog::spdlog       
 )
 
 set_target_properties(onnx2engine PROPERTIES
