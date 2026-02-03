@@ -8,3 +8,10 @@ dist/
 __pycache__/
 
 manifest.sh
+
+output
+runs
+
+yolo/weights/*.engine
+yolo/weights/*.onnx
+botsort/weights/*.engine
