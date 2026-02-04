@@ -118,7 +118,7 @@ static void parseHxW(const std::string& s, int& h, int& w) {
 }
 
 static void usage() {
-    std::cerr <<
+    spdlog::info(
         "Usage:\n"
         "  onnx2engine <model.onnx> [fp32|fp16|int8] [gpu_id] [workspace_mb] [verbose]\n"
         "            [--batch N] [--minhw HxW] [--opthw HxW] [--maxhw HxW]\n\n"
@@ -130,7 +130,8 @@ static void usage() {
         "    Defaults: min=640x640 opt=960x960 max=1280x1280, batch=1.\n\n"
         "Examples:\n"
         "  onnx2engine yolo11s.onnx fp16 0 2048\n"
-        "  onnx2engine yolo_dyn.onnx fp16 0 4096 0 --minhw 640x640 --opthw 960x960 --maxhw 1280x1280\n";
+        "  onnx2engine yolo_dyn.onnx fp16 0 4096 0 --minhw 640x640 --opthw 960x960 --maxhw 1280x1280 --batch 4\n"
+    );
 }
 
 int main(int argc, char** argv) {
@@ -188,7 +189,7 @@ int main(int argc, char** argv) {
             config->setFlag(nvinfer1::BuilderFlag::kFP16);
         } else if (precision == Precision::INT8) {
             config->setFlag(nvinfer1::BuilderFlag::kINT8);
-            std::cerr << "[WARN] INT8 selected. You need Q/DQ ONNX or an INT8 calibrator.\n";
+            spdlog::warn("[WARN] INT8 selected. You need Q/DQ ONNX or an INT8 calibrator.");
         }
         
         TrtUnique<nvonnxparser::IParser> parser(nvonnxparser::createParser(*network, logger));
@@ -198,9 +199,9 @@ int main(int argc, char** argv) {
                                      : (int)nvinfer1::ILogger::Severity::kINFO;
 
         if (!parser->parseFromFile(onnxPath.c_str(), parseVerbosity)) {
-            std::cerr << "ONNX parse failed.\n";
+            spdlog::error("ONNX parse failed.");
             for (int i = 0; i < parser->getNbErrors(); ++i)
-                std::cerr << "  [ONNX ERROR] " << parser->getError(i)->desc() << "\n";
+                spdlog::error("  [ONNX ERROR] {}", parser->getError(i)->desc());
             return 1;
         }
 
@@ -279,7 +280,7 @@ int main(int argc, char** argv) {
             needProfile ? "yes" : "no");
         return 0;
     } catch (const std::exception& e) {
-        std::cerr << "[FATAL] " << e.what() << "\n";
+        spdlog::error("[FATAL] {}", e.what());
         usage();
         return 1;
     }

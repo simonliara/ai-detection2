@@ -9,6 +9,7 @@
 #include "NvInfer.h"
 #include <opencv2/opencv.hpp>
 #include <cuda_runtime.h>
+#include "spdlog/spdlog.h"
 
 #include "track.h" 
 
@@ -19,11 +20,6 @@ extern void cuda_preprocess(const uint8_t* src, int src_w, int src_h, int src_st
 extern void cuda_preprocess_init(int max_w, int max_h);
 extern void cuda_preprocess_destroy();
 
-extern void cuda_decode(float* predict, int num_bboxes, int num_classes, float conf_thresh, 
-                        float* output, int max_objects, int* num_valid_objects, cudaStream_t stream);
-
-extern void cuda_nms(float* output, int* num_valid_objects, float nms_thresh, int max_objects, cudaStream_t stream);
-
 extern void cuda_decode(const float* predict, int num_bboxes, int num_classes, 
                            float conf_thresh, float* output, int max_objects, 
                            int* num_valid_objects, float scale, float ox, float oy,
@@ -33,8 +29,7 @@ extern void cuda_nms(float* bboxes, int* num_valid_objects, float nms_thresh,
 
 inline void checkCuda(cudaError_t result, const char* func, const char* file, int line) {
     if (result != cudaSuccess) {
-        std::cerr << "CUDA Error: " << cudaGetErrorString(result) << " at " 
-                  << file << ":" << line << " (" << func << ")" << std::endl;
+        spdlog::error("CUDA Error: {} at {}:{} ({})", cudaGetErrorString(result), file, line, func);
     }
 }
 #define CHECK_CUDA(val) checkCuda((val), #val, __FILE__, __LINE__)
@@ -82,7 +77,7 @@ YOLOv11::Impl::Impl(std::string model_path, nvinfer1::ILogger& logger, float con
     : conf_threshold(conf_thresh), nms_threshold(nms_thresh)
 {
     if (model_path.find(".engine") == std::string::npos) {
-        std::cerr << "[Error] Model must be an .engine file." << std::endl;
+        spdlog::error("[Error] Model must be an .engine file.");
         abort();
     }
     cpu_valid_count = new int[1];
@@ -120,7 +115,7 @@ void YOLOv11::Impl::init(const std::string& engine_path, nvinfer1::ILogger& logg
 
     std::ifstream file(engine_path, std::ios::binary | std::ios::ate);
     if (!file.good()) {
-        std::cerr << "[Error] Could not read engine file: " << engine_path << std::endl;
+        spdlog::error("[Error] Could not read engine file: {}", engine_path);
         abort();
     }
 
@@ -129,14 +124,14 @@ void YOLOv11::Impl::init(const std::string& engine_path, nvinfer1::ILogger& logg
 
     std::vector<char> buffer(size);
     if (!file.read(buffer.data(), size)) {
-        std::cerr << "[Error] Failed to read engine file content." << std::endl;
+        spdlog::error("[Error] Failed to read engine file content.");   
         abort();
     }
 
     runtime = nvinfer1::createInferRuntime(logger);
     engine = runtime->deserializeCudaEngine(buffer.data(), size);
     if (!engine) {
-        std::cerr << "[Error] Failed to deserialize CUDA engine." << std::endl;
+        spdlog::error("[Error] Failed to deserialize CUDA engine.");
         abort();
     }
     context = engine->createExecutionContext();
@@ -151,14 +146,14 @@ void YOLOv11::Impl::init(const std::string& engine_path, nvinfer1::ILogger& logg
     auto out_dims = engine->getTensorShape(out_name);
 #endif
 
-    std::cout << "Output Dims: " << out_dims.d[0] << "x" << out_dims.d[1] << "x" << out_dims.d[2] << std::endl;
+    spdlog::info("[YOLOv11] Input dims: {}x{}x{} ", in_dims.d[0], in_dims.d[1], in_dims.d[2]);
     input_h = in_dims.d[2];
     input_w = in_dims.d[3];
 
     for (int i = 0; i < engine->getNbIOTensors(); ++i) {
         const char* name = engine->getIOTensorName(i);
         nvinfer1::TensorIOMode mode = engine->getTensorIOMode(name);
-        std::cout << "Tensor " << i << ": " << name << " (" << (mode == nvinfer1::TensorIOMode::kINPUT ? "Input" : "Output") << ")" << std::endl;
+        spdlog::info("[YOLOv11] Tensor {}: {} ({})", i, name, (mode == nvinfer1::TensorIOMode::kINPUT ? "Input" : "Output"));
     }
     
     detection_attribute_size = out_dims.d[1];
@@ -200,18 +195,18 @@ void YOLOv11::Impl::loadClasses(const std::string& engine_path) {
     }
 
     if (!file.is_open()) {
-        std::cerr << "[WARN] Class file not found (tried: " << txt_path << ")!\n";
+        spdlog::error("[WARN] Class file not found (tried: {})", txt_path);
         exit(1);
     }
 
-    std::cout << "[INFO] Loading classes from: " << txt_path << std::endl;
+    spdlog::info("[INFO] Loading classes from: {}", txt_path);
     std::string line;
     class_names.clear();
     while (std::getline(file, line)) {
         if (!line.empty() && line.back() == '\r') line.pop_back();
         class_names.push_back(line);
     }
-    std::cout << "[INFO] Loaded " << class_names.size() << " classes.\n";
+    spdlog::info("[INFO] Loaded {} classes.", class_names.size());
 }
 
 void YOLOv11::Impl::generateColors() {
@@ -243,7 +238,7 @@ void YOLOv11::preprocess(const cv::Mat& image) {
     } else if (image.channels() == 1) {
         cv::cvtColor(image, bgr, cv::COLOR_GRAY2BGR);
     } else {
-        std::cerr << "Unsupported input type\n";
+        spdlog::error("[Error] Unsupported input type");
         return;
     }
 

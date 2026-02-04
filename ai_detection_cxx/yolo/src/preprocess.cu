@@ -3,6 +3,7 @@
 #include <cmath>
 #include <cstdio>
 #include <iostream>
+#include <spdlog/spdlog.h>
 
 static uint8_t* g_src_device = nullptr;   // packed BGR on device
 static int g_max_w = 0;
@@ -12,9 +13,7 @@ struct AffineMatrix { float v[6]; };
 
 static inline void checkCuda(cudaError_t e, const char* what, const char* file, int line) {
     if (e != cudaSuccess) {
-        std::cerr << "CUDA Error: " << cudaGetErrorString(e)
-                  << " at " << file << ":" << line
-                  << " (" << what << ")\n";
+        spdlog::error("CUDA Error: {} at {}:{} ({})", cudaGetErrorString(e), file, line, what);
         std::abort();
     }
 }
@@ -98,13 +97,11 @@ void cuda_preprocess(const uint8_t* src, int src_w, int src_h, int src_stride,
 {
     if (!src || !dst_chw) return;
     if (!g_src_device) {
-        std::cerr << "[preprocess] init not called\n";
+        spdlog::error("[preprocess] init not called");
         return;
     }
     if (src_w > g_max_w || src_h > g_max_h) {
-        std::cerr << "[preprocess] src exceeds max buffer: "
-                  << src_w << "x" << src_h << " > "
-                  << g_max_w << "x" << g_max_h << "\n";
+        spdlog::error("[preprocess] src exceeds max buffer: {}x{} > {}x{}", src_w, src_h, g_max_w, g_max_h);
         return;
     }
 

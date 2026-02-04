@@ -13,7 +13,7 @@ if(NOT DEFINED CMAKE_CUDA_ARCHITECTURES)
 endif()
 message(STATUS "[YOLO] Setting CUDA Architecture to: ${CMAKE_CUDA_ARCHITECTURES}")
 
-add_library(${PROJECT_NAME} SHARED
+add_library(${PROJECT_NAME} STATIC
   src/YOLOv11.cpp
   src/preprocess.cu
   src/postprocess.cu
