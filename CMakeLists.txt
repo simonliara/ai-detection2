@@ -1,10 +1,34 @@
 ﻿cmake_minimum_required(VERSION 3.16)
 
-set(VERSION_NUMBER_FILE "${CMAKE_CURRENT_SOURCE_DIR}/version.txt")
-if(EXISTS "${VERSION_NUMBER_FILE}")
-  file(STRINGS "${VERSION_NUMBER_FILE}" VERSION_NUMBER)
-else()
-  set(VERSION_NUMBER "0.1.0")
+set(AI_DETECTION_NVCC "/usr/local/cuda/bin/nvcc" CACHE FILEPATH "Path to nvcc")
+
+if((NOT DEFINED CMAKE_CUDA_COMPILER OR CMAKE_CUDA_COMPILER STREQUAL "") AND NOT DEFINED CUDACXX)
+
+  if(EXISTS "${AI_DETECTION_NVCC}")
+    set(CMAKE_CUDA_COMPILER "${AI_DETECTION_NVCC}" CACHE FILEPATH "CUDA compiler" FORCE)
+    message(STATUS "[ROOT] Using nvcc from AI_DETECTION_NVCC: ${CMAKE_CUDA_COMPILER}")
+  else()
+    find_program(_AI_DETECTION_NVCC
+      NAMES nvcc
+      PATHS
+        /usr/local/cuda/bin
+        /usr/local/cuda-12/bin
+        /usr/local/cuda-11/bin
+        /usr/bin
+      NO_DEFAULT_PATH
+    )
+
+    if(NOT _AI_DETECTION_NVCC)
+      find_program(_AI_DETECTION_NVCC NAMES nvcc)
+    endif()
+
+    if(_AI_DETECTION_NVCC)
+      set(CMAKE_CUDA_COMPILER "${_AI_DETECTION_NVCC}" CACHE FILEPATH "CUDA compiler" FORCE)
+      message(STATUS "[ROOT] Found nvcc: ${CMAKE_CUDA_COMPILER}")
+    else()
+      message(STATUS "[ROOT] nvcc not found in common paths and not in PATH.")
+    endif()
+  endif()
 endif()
 
 project(ai-detection VERSION ${VERSION_NUMBER} LANGUAGES CXX CUDA)
