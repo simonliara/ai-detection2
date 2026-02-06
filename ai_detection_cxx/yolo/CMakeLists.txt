@@ -2,17 +2,6 @@ cmake_minimum_required(VERSION 3.16)
 
 project(yolo VERSION 1.0 LANGUAGES CXX CUDA)
 
-if(NOT DEFINED CMAKE_CUDA_ARCHITECTURES)
-    if(CMAKE_SYSTEM_PROCESSOR MATCHES "aarch64" AND CMAKE_SYSTEM_NAME STREQUAL "Linux")
-        message(STATUS "[YOLO] Platform detected: NVIDIA Jetson")
-        set(CMAKE_CUDA_ARCHITECTURES 87) 
-    else()
-        message(STATUS "[YOLO] Platform detected: Desktop/PC")
-        set(CMAKE_CUDA_ARCHITECTURES native)
-    endif()
-endif()
-message(STATUS "[YOLO] Setting CUDA Architecture to: ${CMAKE_CUDA_ARCHITECTURES}")
-
 add_library(${PROJECT_NAME} STATIC
   src/YOLOv11.cpp
   src/preprocess.cu
@@ -29,34 +18,42 @@ set_target_properties(${PROJECT_NAME} PROPERTIES
 
 find_package(OpenCV REQUIRED)
 find_package(CUDAToolkit REQUIRED)
+find_package(TensorRT REQUIRED)
 
 target_include_directories(${PROJECT_NAME} PUBLIC
   $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/src>
   $<INSTALL_INTERFACE:include>
-  ${TENSORRT_INCLUDE_DIR} 
 )
 
 target_link_libraries(${PROJECT_NAME} PUBLIC
-  botsort
-  bytetrack
   ${OpenCV_LIBS}
   CUDA::cudart
-  ${TENSORRT_LIBS}
-  spdlog::spdlog       
+  TensorRT::nvinfer
+  TensorRT::nvinfer_plugin
+  TensorRT::nvonnxparser
+  spdlog::spdlog
+  botsort
+  bytetrack
 )
+
+if(TARGET TensorRT::nvparsers)
+  target_link_libraries(${PROJECT_NAME} PUBLIC TensorRT::nvparsers)
+endif()
 
 add_executable(onnx2engine src/onnx2engine.cpp)
 
-target_include_directories(onnx2engine PRIVATE
-    ${TENSORRT_INCLUDE_DIR} 
+target_link_libraries(onnx2engine PRIVATE
+  CUDA::cudart
+  TensorRT::nvinfer
+  TensorRT::nvinfer_plugin
+  TensorRT::nvonnxparser
+  spdlog::spdlog
 )
 
-target_link_libraries(onnx2engine PRIVATE
-    CUDA::cudart
-    ${TENSORRT_LIBS}
-    spdlog::spdlog       
-)
+if(TARGET TensorRT::nvparsers)
+  target_link_libraries(onnx2engine PRIVATE TensorRT::nvparsers)
+endif()
 
 set_target_properties(onnx2engine PROPERTIES
-    RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin
+  RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin
 )

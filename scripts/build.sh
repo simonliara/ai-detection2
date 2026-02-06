@@ -8,8 +8,9 @@ DEFAULT_TARGETS="
     ai-detection.deb
     webcam
     onnx2engine
-        "
+"
 
+# parse args
 TARGET=""
 VERBOSE="-DCMAKE_VERBOSE_MAKEFILE=TRUE"
 OPTIONS=
